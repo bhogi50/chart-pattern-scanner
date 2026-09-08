@@ -1,155 +1,79 @@
 import numpy as np
-import pandas as pd
 
+def pivots(df,left=3,right=3):
+    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
+    hi=[]; lo=[]
+    for i in range(left,len(df)-right):
+        if h[i]>=max(h[i-left:i+right+1]): hi.append(i)
+        if l[i]<=min(l[i-left:i+right+1]): lo.append(i)
+    return hi,lo
 
-def _regression(x, y):
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    if len(x) < 2:
-        return 0.0, 0.0, 0.0
-    m, b = np.polyfit(x, y, 1)
-    pred = m * x + b
-    ss_res = np.sum((y - pred) ** 2)
-    ss_tot = np.sum((y - y.mean()) ** 2)
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else 0.0
-    return float(m), float(b), float(np.clip(r2, 0, 1))
+def reg(x,y):
+    if len(x)<2:return 0.,0.,0.
+    m,b=np.polyfit(np.asarray(x,float),np.asarray(y,float),1)
+    p=m*np.asarray(x)+b
+    ss=np.sum((np.asarray(y)-p)**2); st=np.sum((np.asarray(y)-np.mean(y))**2)
+    return float(m),float(b),float(np.clip(1-ss/st if st else 0,0,1))
 
+def trend_score(df):
+    c=df["Close"].to_numpy(float)
+    if len(c)<30:return 50.
+    return float(np.clip(50+(np.mean(c[-10:])/max(np.mean(c[-30:]),1e-9)-1)*500+
+                         (c[-1]/max(c[-11],1e-9)-1)*200,0,100))
 
-def find_pivots(df, left=3, right=3):
-    high = df["High"].to_numpy(float)
-    low = df["Low"].to_numpy(float)
-    highs, lows = [], []
+def volume_score(df):
+    if "Volume" not in df or len(df)<25:return 50.
+    v=df["Volume"].dropna()
+    if len(v)<25:return 50.
+    return float(np.clip(50+(v.iloc[-1]/max(v.iloc[-21:-1].mean(),1e-9)-1)*50,0,100))
 
-    for i in range(left, len(df) - right):
-        window_h = high[i-left:i+right+1]
-        window_l = low[i-left:i+right+1]
-        if high[i] >= window_h.max():
-            highs.append(i)
-        if low[i] <= window_l.min():
-            lows.append(i)
-
-    return highs, lows
-
-
-def _confidence(r2_high, r2_low, convergence, touches):
-    value = (
-        0.35 * r2_high
-        + 0.35 * r2_low
-        + 0.20 * np.clip(convergence, 0, 1)
-        + 0.10 * np.clip(touches / 8, 0, 1)
-    )
-    return round(float(np.clip(value * 100, 0, 99)), 1)
-
-
-def detect_patterns(df, lookback=120):
-    required = {"Open", "High", "Low", "Close"}
-    if not required.issubset(df.columns):
-        return []
-
-    df = df.copy().dropna(subset=list(required)).tail(lookback)
-    if len(df) < 45:
-        return []
-
-    highs, lows = find_pivots(df)
-    if len(highs) < 2 or len(lows) < 2:
-        return []
-
-    xh = np.asarray(highs[-5:], dtype=float)
-    yh = df["High"].iloc[highs[-5:]].to_numpy(float)
-    xl = np.asarray(lows[-5:], dtype=float)
-    yl = df["Low"].iloc[lows[-5:]].to_numpy(float)
-
-    mh, bh, r2h = _regression(xh, yh)
-    ml, bl, r2l = _regression(xl, yl)
-
-    price_scale = max(float(df["Close"].mean()), 1e-9)
-    high_slope = mh / price_scale
-    low_slope = ml / price_scale
-
-    start = max(0, len(df) - 40)
-    end = len(df) - 1
-
-    width_start = (mh * start + bh) - (ml * start + bl)
-    width_end = (mh * end + bh) - (ml * end + bl)
-    convergence = (
-        (width_start - width_end) / abs(width_start)
-        if abs(width_start) > 1e-9 else 0.0
-    )
-
-    touches = len(xh) + len(xl)
-    results = []
-
-    def add(name, direction, confidence):
-        results.append({
-            "Pattern": name,
-            "Direction": direction,
-            "Confidence": round(float(confidence), 1),
-        })
-
-    if high_slope < -0.0007 and low_slope > 0.0007 and convergence > 0.12:
-        add("Symmetrical Triangle", "Neutral",
-            _confidence(r2h, r2l, convergence, touches))
-
-    if abs(high_slope) < 0.0007 and low_slope > 0.0007 and convergence > 0.10:
-        add("Ascending Triangle", "Bullish",
-            _confidence(r2h, r2l, convergence, touches))
-
-    if high_slope < -0.0007 and abs(low_slope) < 0.0007 and convergence > 0.10:
-        add("Descending Triangle", "Bearish",
-            _confidence(r2h, r2l, convergence, touches))
-
-    if high_slope > 0.0004 and low_slope > 0.0004:
-        if high_slope < low_slope and convergence > 0.08:
-            add("Rising Wedge", "Bearish",
-                _confidence(r2h, r2l, convergence, touches))
-
-    if high_slope < -0.0004 and low_slope < -0.0004:
-        if high_slope > low_slope and convergence > 0.08:
-            add("Falling Wedge", "Bullish",
-                _confidence(r2h, r2l, convergence, touches))
-
-    if abs(high_slope - low_slope) < 0.0007 and abs(high_slope) > 0.00035:
-        add(
-            "Rising Channel" if high_slope > 0 else "Falling Channel",
-            "Bullish" if high_slope > 0 else "Bearish",
-            _confidence(r2h, r2l, 0.5, touches),
-        )
-
-    if len(highs) >= 2:
-        a, b = highs[-2], highs[-1]
-        va = float(df["High"].iloc[a])
-        vb = float(df["High"].iloc[b])
-        similarity = abs(va - vb) / max(va, vb)
-        if b - a >= 5 and similarity < 0.025:
-            add("Double Top", "Bearish", 78 + 15 * (1 - similarity / 0.025))
-
-    if len(lows) >= 2:
-        a, b = lows[-2], lows[-1]
-        va = float(df["Low"].iloc[a])
-        vb = float(df["Low"].iloc[b])
-        similarity = abs(va - vb) / max(va, vb)
-        if b - a >= 5 and similarity < 0.025:
-            add("Double Bottom", "Bullish", 78 + 15 * (1 - similarity / 0.025))
-
-    if len(df) > 32:
-        prior = df["Close"].iloc[-30:-20]
-        consolidation = df["Close"].iloc[-20:]
-        prior_return = float(prior.iloc[-1] / prior.iloc[0] - 1)
-        consolidation_range = float(
-            (consolidation.max() - consolidation.min())
-            / max(consolidation.mean(), 1e-9)
-        )
-
-        if prior_return > 0.08 and consolidation_range < 0.10:
-            add("Bullish Flag", "Bullish", 78)
-
-        if prior_return < -0.08 and consolidation_range < 0.10:
-            add("Bearish Flag", "Bearish", 78)
-
-    best = {}
-    for result in results:
-        key = result["Pattern"]
-        if key not in best or result["Confidence"] > best[key]["Confidence"]:
-            best[key] = result
-
-    return sorted(best.values(), key=lambda x: x["Confidence"], reverse=True)
+def detect_patterns(df,tide_df=None,wave_df=None,lookback=120):
+    req={"Open","High","Low","Close"}
+    if not req.issubset(df.columns): return []
+    df=df.dropna(subset=list(req)).tail(lookback)
+    if len(df)<45:return []
+    tide_df=tide_df if tide_df is not None else df
+    wave_df=wave_df if wave_df is not None else df
+    hi,lo=pivots(df)
+    if len(hi)<2 or len(lo)<2:return []
+    xh=np.array(hi[-5:],float); yh=df.High.iloc[hi[-5:]].to_numpy(float)
+    xl=np.array(lo[-5:],float); yl=df.Low.iloc[lo[-5:]].to_numpy(float)
+    mh,bh,rh=reg(xh,yh); ml,bl,rl=reg(xl,yl)
+    scale=max(float(df.Close.mean()),1e-9); sh,sl=mh/scale,ml/scale
+    s=max(0,len(df)-40); e=len(df)-1
+    w0=(mh*s+bh)-(ml*s+bl); w1=(mh*e+bh)-(ml*e+bl)
+    conv=(w0-w1)/abs(w0) if abs(w0)>1e-9 else 0
+    geometry=float(np.clip(50*(rh+rl)/2+50*np.clip(conv,0,1),0,100))
+    cleanliness=float(np.clip(50+(len(xh)+len(xl))*6,0,100))
+    volume=volume_score(df)
+    ts=trend_score(tide_df); ws=trend_score(wave_df)
+    out=[]
+    def add(name,direction):
+        if direction=="Bullish": a,b=ts,ws
+        elif direction=="Bearish": a,b=100-ts,100-ws
+        else:a=b=50.
+        score=.30*geometry+.25*a+.20*b+.10*volume+.10*50+.05*cleanliness
+        out.append({"Pattern":name,"Direction":direction,"Confidence":round(float(np.clip(score,0,100)),1),
+                    "Tide Score":round(a,1),"Wave Score":round(b,1),
+                    "Geometry":round(geometry,1),"Volume":round(volume,1),"Status":"FORMING"})
+    if sh<-.0007 and sl>.0007 and conv>.12:add("Symmetrical Triangle","Neutral")
+    if abs(sh)<.0007 and sl>.0007 and conv>.10:add("Ascending Triangle","Bullish")
+    if sh<-.0007 and abs(sl)<.0007 and conv>.10:add("Descending Triangle","Bearish")
+    if sh>.0004 and sl>.0004 and sh<sl and conv>.08:add("Rising Wedge","Bearish")
+    if sh<-.0004 and sl<-.0004 and sh>sl and conv>.08:add("Falling Wedge","Bullish")
+    if abs(sh-sl)<.0007 and abs(sh)>.00035:add("Rising Channel" if sh>0 else "Falling Channel","Bullish" if sh>0 else "Bearish")
+    if len(hi)>=2:
+        a,b=hi[-2],hi[-1]; va,vb=float(df.High.iloc[a]),float(df.High.iloc[b])
+        if b-a>=5 and abs(va-vb)/max(va,vb)<.025:add("Double Top","Bearish")
+    if len(lo)>=2:
+        a,b=lo[-2],lo[-1]; va,vb=float(df.Low.iloc[a]),float(df.Low.iloc[b])
+        if b-a>=5 and abs(va-vb)/max(va,vb)<.025:add("Double Bottom","Bullish")
+    if len(df)>32:
+        p=df.Close.iloc[-30:-20]; c=df.Close.iloc[-20:]; r=float(p.iloc[-1]/p.iloc[0]-1)
+        cr=float((c.max()-c.min())/max(c.mean(),1e-9))
+        if r>.08 and cr<.10:add("Bullish Flag","Bullish")
+        if r<-.08 and cr<.10:add("Bearish Flag","Bearish")
+    best={}
+    for x in out:
+        if x["Pattern"] not in best or x["Confidence"]>best[x["Pattern"]]["Confidence"]:best[x["Pattern"]]=x
+    return sorted(best.values(),key=lambda x:x["Confidence"],reverse=True)

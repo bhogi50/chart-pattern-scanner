@@ -3,189 +3,87 @@ import pandas as pd
 import plotly.graph_objects as go
 from detector import detect_patterns
 
-st.set_page_config(
-    page_title="NSE Chart Pattern Scanner",
-    page_icon="📈",
-    layout="wide",
-)
+st.set_page_config(page_title="Chart Pattern Scanner",page_icon="📈",layout="wide")
 
-st.title("📈 NSE Chart Pattern Scanner")
-st.caption("Personal technical-analysis scanner • heuristic pattern detection")
+# Constituent lists can be expanded without changing the scanner engine.
+UNIVERSES={
+"NIFTY 50":["ADANIENT","ADANIPORTS","APOLLOHOSP","ASIANPAINT","AXISBANK","BAJAJ-AUTO","BAJAJFINSV","BAJFINANCE","BEL","BHARTIARTL","BPCL","BRITANNIA","CIPLA","COALINDIA","DRREDDY","EICHERMOT","ETERNAL","GRASIM","HCLTECH","HDFCBANK","HDFCLIFE","HEROMOTOCO","HINDALCO","HINDUNILVR","ICICIBANK","INDUSINDBK","INFY","ITC","JIOFIN","JSWSTEEL","KOTAKBANK","LT","M&M","MARUTI","NESTLEIND","NTPC","ONGC","POWERGRID","RELIANCE","SBILIFE","SBIN","SHRIRAMFIN","SUNPHARMA","TATACONSUM","TATAMOTORS","TATASTEEL","TCS","TECHM","TITAN","TRENT","ULTRACEMCO"],
+"NIFTY Next 50":[],"NIFTY Midcap 150":[],"NIFTY Smallcap 250":[]}
 
-NIFTY_50 = [
-    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
-    "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BEL", "BHARTIARTL",
-    "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
-    "EICHERMOT", "ETERNAL", "GRASIM", "HCLTECH", "HDFCBANK",
-    "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "ICICIBANK",
-    "INDUSINDBK", "INFY", "ITC", "JIOFIN", "JSWSTEEL",
-    "KOTAKBANK", "LT", "M&M", "MARUTI", "NESTLEIND",
-    "NTPC", "ONGC", "POWERGRID", "RELIANCE", "SBILIFE",
-    "SBIN", "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM", "TATAMOTORS",
-    "TATASTEEL", "TCS", "TECHM", "TITAN", "TRENT",
-    "ULTRACEMCO",
-]
+REL={"Daily":("1d","4h","1y"),"Weekly":("1wk","1d","5y"),"Monthly":("1mo","1wk","10y")}
+
+@st.cache_data(ttl=900,show_spinner=False)
+def data(symbol,period,interval):
+    import yfinance as yf
+    x=yf.download(symbol,period=period,interval=interval,auto_adjust=False,progress=False)
+    if isinstance(x.columns,pd.MultiIndex):x.columns=x.columns.get_level_values(0)
+    return x.dropna()
 
 with st.sidebar:
     st.header("Scanner")
+    universe=st.selectbox("Universe",list(UNIVERSES))
+    tide=st.selectbox("Candle / Tide",["Daily","Weekly","Monthly"])
+    view=st.radio("View",["All","Bullish","Bearish"])
+    st.markdown("**Tide → Wave**")
+    st.write("Daily → 4H")
+    st.write("Weekly → Daily")
+    st.write("Monthly → Weekly")
+    scan=st.button("🔎 SCAN",type="primary",use_container_width=True)
 
-    lookback = st.slider(
-        "Lookback candles",
-        min_value=60,
-        max_value=250,
-        value=120,
-    )
-
-    max_stocks = st.slider(
-        "Stocks to scan",
-        min_value=5,
-        max_value=len(NIFTY_50),
-        value=len(NIFTY_50),
-    )
-
-    scan_button = st.button(
-        "🔎 Scan NIFTY 50",
-        type="primary",
-        use_container_width=True,
-    )
-
-    st.divider()
-    st.caption("Daily data • Yahoo Finance symbols use .NS")
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_data(symbol):
-    import yfinance as yf
-
-    data = yf.download(
-        symbol,
-        period="1y",
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-    )
-
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-
-    return data.dropna()
-
-
-if scan_button:
-    rows = []
-    symbols = NIFTY_50[:max_stocks]
-    progress = st.progress(0)
-
-    for index, symbol in enumerate(symbols, start=1):
+if scan:
+    symbols=UNIVERSES[universe]
+    if not symbols:
+        st.warning("This universe is enabled in the UI, but its constituent list is not bundled yet. NIFTY 50 is ready.")
+        st.stop()
+    ti,wi,tp=REL[tide]; rows=[]; bar=st.progress(0)
+    for n,s in enumerate(symbols,1):
         try:
-            data = load_data(symbol + ".NS")
-            patterns = detect_patterns(data, lookback)
+            td=data(s+".NS",tp,ti)
+            wp=data(s+".NS","60d" if tide=="Daily" else ("2y" if tide=="Weekly" else "5y"),wi)
+            for p in detect_patterns(td,td,wp):
+                if view=="All" or p["Direction"]==view:rows.append({"Stock":s,"Tide":tide,**p})
+        except Exception:pass
+        bar.progress(n/len(symbols))
+    st.session_state.results=pd.DataFrame(rows)
+    st.session_state.filters=(universe,tide,view)
 
-            for pattern in patterns:
-                rows.append({
-                    "Stock": symbol,
-                    **pattern,
-                })
-        except Exception:
-            pass
-
-        progress.progress(index / len(symbols))
-
-    st.session_state["scan_results"] = pd.DataFrame(rows)
-
-if "scan_results" not in st.session_state:
-    st.info("Choose the lookback and press **Scan NIFTY 50**.")
-    st.markdown(
-        """
-        ### Currently detected
-
-        - Symmetrical Triangle
-        - Ascending Triangle
-        - Descending Triangle
-        - Rising Wedge
-        - Falling Wedge
-        - Rising Channel
-        - Falling Channel
-        - Double Top
-        - Double Bottom
-        - Bullish Flag
-        - Bearish Flag
-        """
-    )
+if "results" not in st.session_state:
+    st.info("Select the Universe, Candle/Tide and View, then press SCAN.")
     st.stop()
 
-results = st.session_state["scan_results"]
-
-if results.empty:
-    st.warning("No qualifying patterns were found.")
+r=st.session_state.results
+if r.empty:
+    st.warning("No qualifying patterns found.")
     st.stop()
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Stocks scanned", max_stocks)
-c2.metric("Patterns found", len(results))
-c3.metric(
-    "High confidence ≥ 85",
-    int((results["Confidence"] >= 85).sum()),
-)
+a,b,c=st.columns(3)
+a.metric("Stocks scanned",len(UNIVERSES[st.session_state.filters[0]]))
+b.metric("Patterns found",len(r))
+c.metric("Confidence ≥ 80",int((r.Confidence>=80).sum()))
 
-st.subheader("Detected patterns")
-
-display = results.sort_values(
-    ["Confidence", "Stock"],
-    ascending=[False, True],
-)
-
-st.dataframe(
-    display,
-    use_container_width=True,
-    hide_index=True,
-)
-
-st.download_button(
-    "⬇️ Download scan CSV",
-    display.to_csv(index=False),
-    "pattern_scan.csv",
-    "text/csv",
-)
+st.subheader("Scan results")
+st.dataframe(r.sort_values(["Confidence","Stock"],ascending=[False,True]),use_container_width=True,hide_index=True)
+st.download_button("⬇️ Download CSV",r.to_csv(index=False),"pattern_scan.csv","text/csv")
 
 st.divider()
-st.subheader("Stock chart")
+selected=st.selectbox("Stock chart",sorted(r.Stock.unique()))
+ti,wi,tp=REL[st.session_state.filters[1]]
+d=data(selected+".NS",tp,ti)
+fig=go.Figure(go.Candlestick(x=d.index,open=d.Open,high=d.High,low=d.Low,close=d.Close))
+fig.update_layout(title=f"{selected} — {st.session_state.filters[1]} Tide",height=600,xaxis_rangeslider_visible=False)
+st.plotly_chart(fig,use_container_width=True)
 
-selected = st.selectbox(
-    "Select stock",
-    sorted(results["Stock"].unique()),
-)
+st.subheader("Confidence calculation")
+st.markdown("""
+**Confidence is a technical-quality score, not a probability of profit.**
 
-data = load_data(selected + ".NS")
+- **30% Geometry:** trendline fit, convergence and pivot structure.
+- **25% Tide alignment:** higher-timeframe trend agrees with the pattern.
+- **20% Wave alignment:** lower-timeframe trend confirms the Tide.
+- **10% Volume:** latest volume versus recent average.
+- **10% Breakout:** currently a neutral placeholder; will become breakout/proximity logic.
+- **5% Cleanliness:** structural pivot/touch quality.
 
-fig = go.Figure(
-    go.Candlestick(
-        x=data.index,
-        open=data["Open"],
-        high=data["High"],
-        low=data["Low"],
-        close=data["Close"],
-        name=selected,
-    )
-)
-
-fig.update_layout(
-    height=600,
-    xaxis_rangeslider_visible=False,
-    title=f"{selected} — Daily chart",
-)
-
-st.plotly_chart(fig, use_container_width=True)
-
-stock_patterns = display[display["Stock"] == selected]
-
-st.subheader("Detected patterns for " + selected)
-st.dataframe(
-    stock_patterns,
-    use_container_width=True,
-    hide_index=True,
-)
-
-st.warning(
-    "Confidence is a pattern-quality ranking score, not a probability "
-    "and not a trading recommendation."
-)
+This makes the score reflect **pattern + Tide + Wave**, rather than pattern shape alone.
+""")
+st.warning("The Daily → 4H leg uses Yahoo Finance in this prototype. Intraday history/availability is provider-dependent; a proper NSE intraday provider should be used before relying on long historical 4H scans.")
