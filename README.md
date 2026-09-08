@@ -1,18 +1,15 @@
-# Chart Pattern Scanner — MVP
+# NSE Chart Pattern Scanner V2
 
-A small Streamlit application for rule-based chart-pattern detection.
+Personal Streamlit application for scanning NIFTY 50 daily OHLCV data and detecting
+heuristic chart patterns.
 
-## Run
+## Files
 
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
+- `app.py` — Streamlit UI and NIFTY 50 scanner
+- `detector.py` — pattern detection engine
+- `requirements.txt` — Python dependencies
 
-## Supported patterns
+## Detected patterns
 
 - Symmetrical Triangle
 - Ascending Triangle
@@ -26,23 +23,26 @@ streamlit run app.py
 - Bullish Flag
 - Bearish Flag
 
-The detector uses swing highs/lows, linear regression trendlines, normalized slopes,
-convergence, touch counts and simple consolidation tests.
+## Deploy
 
-This is an MVP. Pattern recognition is heuristic, so confidence is a ranking score,
-not a probability of a future price move.
+The repository is intended for Streamlit Community Cloud.
 
-## CSV format
+After replacing these files in GitHub, Streamlit Community Cloud should rebuild
+the application from the repository.
 
-Date,Open,High,Low,Close,Volume
-2026-01-01,100,105,98,103,100000
+## Important
 
-## Planned production upgrades
+The confidence value is a heuristic pattern-quality score. It is not a statistical
+probability that a pattern will produce a particular future price movement.
 
-1. Scan the complete NSE equity universe.
-2. Multi-timeframe detection: 15m, 1h, daily, weekly.
-3. Pattern overlays and breakout/breakdown levels.
+## Next upgrades
+
+1. All NSE equities rather than only NIFTY 50.
+2. Pattern overlays on candlestick charts.
+3. Breakout/breakdown confirmation.
 4. Volume confirmation.
-5. Pattern lifecycle: forming / confirmed / failed.
-6. Backtesting and precision/recall metrics for each pattern.
-7. Persistent scan results and a web dashboard.
+5. Forming / confirmed / failed pattern lifecycle.
+6. Head & Shoulders and Inverse Head & Shoulders.
+7. Cup & Handle and Rounding Top/Bottom.
+8. Multi-timeframe scanning.
+9. Historical validation and backtesting.

@@ -1,84 +1,191 @@
-
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 from detector import detect_patterns
 
-st.set_page_config(page_title="Chart Pattern Scanner", layout="wide")
-st.title("📈 Chart Pattern Scanner")
-st.caption("Rule-based technical pattern detection. Educational/research use; not investment advice.")
+st.set_page_config(
+    page_title="NSE Chart Pattern Scanner",
+    page_icon="📈",
+    layout="wide",
+)
+
+st.title("📈 NSE Chart Pattern Scanner")
+st.caption("Personal technical-analysis scanner • heuristic pattern detection")
+
+NIFTY_50 = [
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BEL", "BHARTIARTL",
+    "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
+    "EICHERMOT", "ETERNAL", "GRASIM", "HCLTECH", "HDFCBANK",
+    "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "ICICIBANK",
+    "INDUSINDBK", "INFY", "ITC", "JIOFIN", "JSWSTEEL",
+    "KOTAKBANK", "LT", "M&M", "MARUTI", "NESTLEIND",
+    "NTPC", "ONGC", "POWERGRID", "RELIANCE", "SBILIFE",
+    "SBIN", "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM", "TATAMOTORS",
+    "TATASTEEL", "TCS", "TECHM", "TITAN", "TRENT",
+    "ULTRACEMCO",
+]
 
 with st.sidebar:
-    st.header("Data")
-    source = st.radio("Input", ["CSV", "Yahoo Finance"])
-    lookback = st.slider("Pattern lookback", 60, 250, 120)
-    if source == "CSV":
-        uploaded = st.file_uploader("Upload OHLCV CSV", type=["csv"])
-        st.info("CSV columns required: Date, Open, High, Low, Close. Volume is optional.")
-    else:
-        ticker = st.text_input("NSE ticker", "TCS.NS")
-        period = st.selectbox("Period", ["6mo", "1y", "2y", "5y"], index=1)
+    st.header("Scanner")
 
-df = None
-symbol = "CSV"
+    lookback = st.slider(
+        "Lookback candles",
+        min_value=60,
+        max_value=250,
+        value=120,
+    )
 
-if source == "CSV" and uploaded:
-    df = pd.read_csv(uploaded)
-    symbol = uploaded.name
-elif source == "Yahoo Finance":
-    try:
-        import yfinance as yf
-        data = yf.download(ticker, period=period, auto_adjust=False, progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        df = data.reset_index()
-        symbol = ticker
-    except Exception as e:
-        st.error(f"Could not download data: {e}")
+    max_stocks = st.slider(
+        "Stocks to scan",
+        min_value=5,
+        max_value=len(NIFTY_50),
+        value=len(NIFTY_50),
+    )
 
-if df is not None:
-    df.columns = [str(c).strip().title() for c in df.columns]
-    if "Date" in df:
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df.sort_values("Date").set_index("Date")
-    required = {"Open","High","Low","Close"}
-    missing = required - set(df.columns)
-    if missing:
-        st.error(f"Missing columns: {', '.join(sorted(missing))}")
-        st.stop()
+    scan_button = st.button(
+        "🔎 Scan NIFTY 50",
+        type="primary",
+        use_container_width=True,
+    )
 
-    df = df.dropna(subset=list(required))
-    results = detect_patterns(df, lookback=lookback)
+    st.divider()
+    st.caption("Daily data • Yahoo Finance symbols use .NS")
 
-    c1,c2,c3 = st.columns(3)
-    c1.metric("Symbol", symbol)
-    c2.metric("Detected patterns", len(results))
-    c3.metric("Latest close", f"₹{float(df['Close'].iloc[-1]):,.2f}")
+@st.cache_data(ttl=900, show_spinner=False)
+def load_data(symbol):
+    import yfinance as yf
 
-    if results:
-        out = pd.DataFrame(results, columns=["Pattern","Direction","Confidence"])
-        st.subheader("Detected patterns")
-        st.dataframe(out, use_container_width=True, hide_index=True)
-    else:
-        st.warning("No qualifying pattern found in the selected lookback window.")
+    data = yf.download(
+        symbol,
+        period="1y",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+    )
 
-    fig = go.Figure(data=[go.Candlestick(
-        x=df.index, open=df["Open"], high=df["High"],
-        low=df["Low"], close=df["Close"], name=symbol
-    )])
-    fig.update_layout(height=600, xaxis_rangeslider_visible=False,
-                      title=f"{symbol} — price chart")
-    st.plotly_chart(fig, use_container_width=True)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
 
-else:
-    st.markdown("""
-### Quick start
+    return data.dropna()
 
-1. Upload an OHLCV CSV, or choose Yahoo Finance.
-2. Select an NSE ticker such as `TCS.NS`, `RELIANCE.NS`, or `INFY.NS`.
-3. The engine searches for triangles, wedges, channels, flags and double tops/bottoms.
-4. Each match receives a confidence score.
 
-**Next upgrade:** add a full NSE universe scanner, breakout confirmation, support/resistance levels, volume confirmation, and chart overlays for every detected pattern.
-""")
+if scan_button:
+    rows = []
+    symbols = NIFTY_50[:max_stocks]
+    progress = st.progress(0)
+
+    for index, symbol in enumerate(symbols, start=1):
+        try:
+            data = load_data(symbol + ".NS")
+            patterns = detect_patterns(data, lookback)
+
+            for pattern in patterns:
+                rows.append({
+                    "Stock": symbol,
+                    **pattern,
+                })
+        except Exception:
+            pass
+
+        progress.progress(index / len(symbols))
+
+    st.session_state["scan_results"] = pd.DataFrame(rows)
+
+if "scan_results" not in st.session_state:
+    st.info("Choose the lookback and press **Scan NIFTY 50**.")
+    st.markdown(
+        """
+        ### Currently detected
+
+        - Symmetrical Triangle
+        - Ascending Triangle
+        - Descending Triangle
+        - Rising Wedge
+        - Falling Wedge
+        - Rising Channel
+        - Falling Channel
+        - Double Top
+        - Double Bottom
+        - Bullish Flag
+        - Bearish Flag
+        """
+    )
+    st.stop()
+
+results = st.session_state["scan_results"]
+
+if results.empty:
+    st.warning("No qualifying patterns were found.")
+    st.stop()
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Stocks scanned", max_stocks)
+c2.metric("Patterns found", len(results))
+c3.metric(
+    "High confidence ≥ 85",
+    int((results["Confidence"] >= 85).sum()),
+)
+
+st.subheader("Detected patterns")
+
+display = results.sort_values(
+    ["Confidence", "Stock"],
+    ascending=[False, True],
+)
+
+st.dataframe(
+    display,
+    use_container_width=True,
+    hide_index=True,
+)
+
+st.download_button(
+    "⬇️ Download scan CSV",
+    display.to_csv(index=False),
+    "pattern_scan.csv",
+    "text/csv",
+)
+
+st.divider()
+st.subheader("Stock chart")
+
+selected = st.selectbox(
+    "Select stock",
+    sorted(results["Stock"].unique()),
+)
+
+data = load_data(selected + ".NS")
+
+fig = go.Figure(
+    go.Candlestick(
+        x=data.index,
+        open=data["Open"],
+        high=data["High"],
+        low=data["Low"],
+        close=data["Close"],
+        name=selected,
+    )
+)
+
+fig.update_layout(
+    height=600,
+    xaxis_rangeslider_visible=False,
+    title=f"{selected} — Daily chart",
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+stock_patterns = display[display["Stock"] == selected]
+
+st.subheader("Detected patterns for " + selected)
+st.dataframe(
+    stock_patterns,
+    use_container_width=True,
+    hide_index=True,
+)
+
+st.warning(
+    "Confidence is a pattern-quality ranking score, not a probability "
+    "and not a trading recommendation."
+)
