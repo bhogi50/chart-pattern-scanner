@@ -2,84 +2,154 @@
 import io, requests, pandas as pd, streamlit as st, plotly.graph_objects as go
 from detector import geometry, pattern_target
 
-st.set_page_config(page_title="Chart Pattern Scanner",page_icon="📈",layout="wide")
+st.set_page_config(page_title="Chart Pattern Scanner", page_icon="📈", layout="wide")
+
 UNIVERSES={
 "NIFTY 50":"https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv",
 "NIFTY Next 50":"https://www.niftyindices.com/IndexConstituent/ind_niftynext50list.csv",
 "NIFTY Midcap 150":"https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
 "NIFTY Smallcap 250":"https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv"}
-TF={"Daily":("1d","2y"),"Weekly":("1wk","7y"),"Monthly":("1mo","15y")}
+
+CANDLE_OPTIONS={
+"Daily":[50,100,150,200,250,300],
+"Weekly":[26,52,78,104,156],
+"Monthly":[12,24,36,60,120]}
 
 @st.cache_data(ttl=86400)
-def symbols(name):
-    x=pd.read_csv(io.BytesIO(requests.get(UNIVERSES[name],headers={"User-Agent":"Mozilla/5.0"},timeout=20).content))
+def get_symbols(name):
+    r=requests.get(UNIVERSES[name],headers={"User-Agent":"Mozilla/5.0"},timeout=20)
+    r.raise_for_status()
+    x=pd.read_csv(io.BytesIO(r.content))
     col=next(c for c in x.columns if c.upper()=="SYMBOL")
     return x[col].dropna().astype(str).str.strip().tolist()
 
+def period_for(timeframe,n):
+    return {"Daily":max(2,int(n*1.7)), "Weekly":max(2,int(n*1.7)), "Monthly":max(2,int(n*1.7))}[timeframe]
+
 @st.cache_data(ttl=900)
-def prices(sym,period,interval):
+def get_prices(symbol,timeframe,candle_count):
     import yfinance as yf
-    x=yf.download(sym,period=period,interval=interval,auto_adjust=False,progress=False)
+    interval={"Daily":"1d","Weekly":"1wk","Monthly":"1mo"}[timeframe]
+    period=f"{period_for(timeframe,candle_count)}d" if timeframe=="Daily" else (
+        f"{max(2,int(candle_count*1.7/52)+1)}y" if timeframe=="Weekly" else
+        f"{max(2,int(candle_count*1.7/12)+1)}y")
+    x=yf.download(symbol,period=period,interval=interval,auto_adjust=False,progress=False)
     if isinstance(x.columns,pd.MultiIndex): x.columns=x.columns.get_level_values(0)
-    return x.dropna()
+    needed={"Open","High","Low","Close"}
+    if x.empty or not needed.issubset(x.columns): return pd.DataFrame()
+    return x.dropna(subset=list(needed)).tail(candle_count)
 
 st.title("📈 Chart Pattern Scanner")
-st.caption("Pattern-only scanner • charts appear only after selecting a stock")
+st.caption("Pure pattern detection • one result row per stock • details/chart appear only after View")
+
 with st.sidebar:
+    st.header("Scan")
     universe=st.selectbox("Universe",list(UNIVERSES))
-    timeframe=st.selectbox("Timeframe",list(TF))
-    view=st.radio("Direction",["All","Bullish","Bearish","Neutral"])
+    timeframe=st.selectbox("Pattern timeframe",list(CANDLE_OPTIONS))
+    candles=st.selectbox("Number of candles",CANDLE_OPTIONS[timeframe],index=CANDLE_OPTIONS[timeframe].index(
+        {"Daily":100,"Weekly":52,"Monthly":36}[timeframe]))
+    view=st.radio("Direction filter",["All","Bullish","Bearish","Neutral"])
     scan=st.button("🔎 SCAN PATTERNS",type="primary",use_container_width=True)
+    st.caption(f"{candles} {timeframe.lower()} candles will be used for the scan.")
 
 if scan:
-    rows=[]; syms=symbols(universe); interval,period=TF[timeframe]; bar=st.progress(0)
+    try: syms=get_symbols(universe)
+    except Exception as e:
+        st.error(f"Unable to load {universe}: {e}"); st.stop()
+    rows=[]; bar=st.progress(0)
     for i,sym in enumerate(syms,1):
         try:
-            df=prices(sym+".NS",period,interval)
-            if len(df)<60: continue
+            df=get_prices(sym+".NS",timeframe,candles)
+            if len(df)<max(30,min(candles,45)): continue
             found,strength,_,_=geometry(df)
-            for pat,direction in found:
-                if view=="All" or direction==view:
-                    rows.append({"Stock":sym,"Timeframe":timeframe,"Pattern":pat,"Direction":direction,"Pattern Strength":strength})
-        except Exception: pass
-        bar.progress(i/len(syms))
-    st.session_state.results=pd.DataFrame(rows); st.session_state.selected=None
+            selected=[(p,d) for p,d in found if view=="All" or d==view]
+            if selected:
+                dirs=sorted(set(d for _,d in selected))
+                rows.append({
+                    "Stock":sym,
+                    "Timeframe":timeframe,
+                    "Candles":len(df),
+                    "Patterns Detected":", ".join(p for p,_ in selected),
+                    "Direction":", ".join(dirs),
+                    "Pattern Strength":strength})
+        except Exception:
+            continue
+        bar.progress(i/max(1,len(syms)))
+    st.session_state.results=pd.DataFrame(rows)
+    st.session_state.scan_config=(universe,timeframe,candles,view)
+    st.session_state.selected=None
 
 if "results" not in st.session_state:
-    st.info("Select the universe/timeframe and press SCAN PATTERNS.")
+    st.info("Choose the scan settings and press SCAN PATTERNS.")
     st.stop()
 
 r=st.session_state.results
-if r.empty: st.warning("No patterns found."); st.stop()
-st.metric("Detected patterns",len(r))
-st.subheader("Scan results")
-st.caption("No charts are shown here. Click View to open the stock's targets and chart.")
+if r.empty:
+    st.warning("No matching patterns found for the selected settings.")
+    st.stop()
 
-for i,row in r.sort_values("Pattern Strength",ascending=False).reset_index(drop=True).iterrows():
-    a,b,c,d,e,f=st.columns([1.5,1,2.4,1,1,.7])
-    a.write(f"**{row.Stock}**"); b.write(row.Timeframe); c.write(row.Pattern); d.write(row.Direction); e.write(f"{row['Pattern Strength']:.1f}")
-    if f.button("View",key=f"v{i}"):
-        st.session_state.selected=(row.Stock,row.Pattern,row.Timeframe)
-        st.rerun()
+st.subheader("Detected patterns")
+st.caption("One row per stock. Multiple detected patterns are listed in the Patterns Detected column.")
+
+show=r[["Stock","Timeframe","Candles","Patterns Detected","Direction","Pattern Strength"]].copy()
+show["Pattern Strength"]=show["Pattern Strength"].map(lambda x:f"{x:.1f}")
+show=show.sort_values("Stock")
+
+st.dataframe(show,use_container_width=True,hide_index=True)
+
+stock=st.selectbox("Select a stock to view details",["— Select —"]+show.Stock.tolist())
+if stock!="— Select —":
+    st.session_state.selected=stock
 
 if st.session_state.get("selected"):
-    sel,pat,tf=st.session_state.selected
-    df=prices(sel+".NS",*TF[tf]); found,strength,H,L=geometry(df)
-    details=pattern_target(df,pat,found[0][1] if found else "Bullish",H,L)
-    st.divider(); st.subheader(f"{sel} — {pat}")
+    sel=st.session_state.selected
+    row=r[r.Stock==sel].iloc[0]
+    df=get_prices(sel+".NS",row.Timeframe,int(row.Candles))
+    if df.empty:
+        st.error("Price data could not be loaded for this stock. Please scan again.")
+        st.stop()
+
+    found,strength,H,L=geometry(df)
+    available=[(p,d) for p,d in found if p in row["Patterns Detected"].split(", ")]
+    if not available:
+        st.warning("The pattern is no longer detected on the latest data. Please scan again.")
+        st.stop()
+
+    st.divider()
+    st.subheader(f"{sel} — Pattern Details")
+    st.write("**Patterns detected:** "+", ".join(p for p,_ in available))
+
+    labels=[p for p,_ in available]
+    pat=st.selectbox("Pattern to inspect",labels)
+    direction=dict(available)[pat]
+    details=pattern_target(df,pat,direction,H,L)
+    if details is None:
+        st.error("Not enough data to calculate targets.")
+        st.stop()
+
     m1,m2,m3,m4,m5=st.columns(5)
     m1.metric("Current",f"₹{details['current']:,.2f}")
     m2.metric("Entry / Breakout",f"₹{details['entry']:,.2f}")
     m3.metric("Stop / Invalidation",f"₹{details['stop']:,.2f}")
     m4.metric("Target 1",f"₹{details['target1']:,.2f}")
     m5.metric("Target 2",f"₹{details['target2']:,.2f}")
-    st.info(f"Target method: **{details['method']}**")
+
+    risk=abs(details["entry"]-details["stop"]) if details["stop"] is not None else 0
+    reward=abs(details["target1"]-details["entry"])
+    rr=reward/risk if risk else None
+    st.info(f"Target method: **{details['method']}**"+(f" · R/R to T1: **1:{rr:.2f}**" if rr else ""))
+
     fig=go.Figure(go.Candlestick(x=df.index,open=df.Open,high=df.High,low=df.Low,close=df.Close,name="Candles"))
     if H: fig.add_trace(go.Scatter(x=df.index[H],y=df.High.iloc[H],mode="markers",name="Swing High"))
     if L: fig.add_trace(go.Scatter(x=df.index[L],y=df.Low.iloc[L],mode="markers",name="Swing Low"))
-    for y,label,dash in [(details["entry"],"Entry / breakout","dot"),(details["target1"],"Target 1","dash"),(details["target2"],"Target 2","dash"),(details["stop"],"Stop / invalidation","dash")]:
+    for y,label,dash in [(details["entry"],"Entry / breakout","dot"),
+                         (details["target1"],"Target 1","dash"),
+                         (details["target2"],"Target 2","dash"),
+                         (details["stop"],"Stop / invalidation","dash")]:
         if y is not None: fig.add_hline(y=y,line_dash=dash,annotation_text=label)
-    fig.update_layout(height=680,xaxis_rangeslider_visible=False,hovermode="x unified")
+    fig.update_layout(height=680,xaxis_rangeslider_visible=False,hovermode="x unified",
+                      title=f"{sel} — {pat} ({direction})")
     st.plotly_chart(fig,use_container_width=True)
     if st.button("← Close details"):
-        st.session_state.selected=None; st.rerun()
+        st.session_state.selected=None
+        st.rerun()
