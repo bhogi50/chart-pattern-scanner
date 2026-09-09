@@ -113,42 +113,72 @@ def latest_patternpy_results(x, direction="All"):
     return latest
 
 
-def tradingview_chart(symbol, tf):
-    """Render TradingView's free hosted Advanced Chart widget."""
-    interval = {"Daily": "D", "Weekly": "W", "Monthly": "M"}[tf]
-    tv_symbol = f"NSE:{symbol}"
-    config = {
-        "autosize": True,
-        "symbol": tv_symbol,
-        "interval": interval,
-        "timezone": "exchange",
-        "theme": "dark",
-        "style": "1",
-        "withdateranges": True,
-        "hide_side_toolbar": False,
-        "allow_symbol_change": True,
-        "save_image": False,
-        "locale": "en",
-        "calendar": False,
-        "support_host": "https://www.tradingview.com",
-        "details": False,
-    }
-    config_json = json.dumps(config, separators=(",", ":"))
-    copyright_symbol = html.escape(tv_symbol)
-    widget = f"""
-    <div class="tradingview-widget-container" style="height:100%;width:100%">
-      <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
-      <div class="tradingview-widget-copyright" style="font-size:11px;text-align:center">
-        <a href="https://www.tradingview.com/symbols/{copyright_symbol}/" rel="noopener nofollow" target="_blank">
-          <span>Chart by TradingView</span>
-        </a>
-      </div>
-      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-        {config_json}
-      </script>
-    </div>
-    """
-    components.html(widget, height=720, scrolling=False)
+def lightweight_chart(df, detections, symbol, tf):
+    """Render TradingView Lightweight Charts with the same OHLC data used by PatternPy."""
+    candles = []
+    for idx, row in df.iterrows():
+        try:
+            candles.append({
+                "time": int(pd.Timestamp(idx).timestamp()),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+            })
+        except Exception:
+            continue
+
+    markers = []
+    for idx, pattern in detections:
+        try:
+            markers.append({
+                "time": int(pd.Timestamp(idx).timestamp()),
+                "position": "belowBar" if BIAS.get(pattern) == "Bullish" else "aboveBar",
+                "color": "#26a69a" if BIAS.get(pattern) == "Bullish" else "#ef5350",
+                "shape": "arrowUp" if BIAS.get(pattern) == "Bullish" else "arrowDown",
+                "text": pattern,
+            })
+        except Exception:
+            continue
+
+    payload = json.dumps({
+        "candles": candles,
+        "markers": markers,
+        "symbol": symbol,
+        "timeframe": tf,
+        "patterns": [p for _, p in detections],
+    }, separators=(",", ":"))
+
+    chart_html = """<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+html,body{margin:0;padding:0;background:#0f131a;color:#d7dce5;font-family:Arial,sans-serif;overflow:hidden}
+#wrap{height:680px;width:100%;position:relative}#chart{height:640px;width:100%}
+#legend{height:40px;display:flex;align-items:center;padding:0 12px;box-sizing:border-box;border-top:1px solid #242a34;font-size:13px;gap:18px;white-space:nowrap;overflow:hidden}
+</style></head><body>
+<div id="wrap"><div id="chart"></div><div id="legend"></div></div>
+<script>
+const D=__DATA__;
+const chart=LightweightCharts.createChart(document.getElementById('chart'),{
+ autoSize:true,
+ layout:{background:{type:'solid',color:'#0f131a'},textColor:'#c9d1d9'},
+ grid:{vertLines:{color:'#1d232d'},horzLines:{color:'#1d232d'}},
+ crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+ rightPriceScale:{borderColor:'#303744'},
+ timeScale:{borderColor:'#303744',timeVisible:true,secondsVisible:false},
+ localization:{priceFormatter:p=>p.toFixed(2)}
+});
+const series=chart.addSeries(LightweightCharts.CandlestickSeries,{upColor:'#26a69a',downColor:'#ef5350',borderUpColor:'#26a69a',borderDownColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350'});
+series.setData(D.candles);
+if(D.markers.length) LightweightCharts.createSeriesMarkers(series,D.markers.sort((a,b)=>a.time-b.time));
+chart.timeScale().fitContent();
+document.getElementById('legend').innerHTML='<b>'+D.symbol+'</b> · '+D.timeframe+' · PatternPy: <b>'+D.patterns.join(', ')+'</b> · TradingView Lightweight Charts';
+</script></body></html>"""
+    chart_html = chart_html.replace("__DATA__", payload)
+    components.html(chart_html, height=685, scrolling=False)
 
 
 st.title("📈 Chart Pattern Scanner")
@@ -211,6 +241,15 @@ if "results" in st.session_state:
 if st.session_state.get("selected"):
     s = st.session_state.selected
     st.divider()
-    st.subheader(f"{s} — TradingView chart")
-    st.caption(f"PatternPy detected: {next((r['Pattern'] for r in st.session_state.results if r['Stock'] == s), 'None')}")
-    tradingview_chart(s, tf)
+    st.subheader(f"{s} — TradingView Lightweight Chart")
+    d = prices(s + ".NS", tf, n)
+    if d.empty:
+        st.error("Price data could not be loaded for this stock.")
+    else:
+        x = patternpy(d)
+        detected = latest_patternpy_results(x, direction="All")
+        if detected:
+            st.caption("PatternPy detected: " + ", ".join(p for _, p in detected))
+            lightweight_chart(d, detected, s, tf)
+        else:
+            st.info("No current PatternPy detection for this stock. Please scan again.")
