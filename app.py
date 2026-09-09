@@ -3,6 +3,28 @@ import io, json, html, requests, pandas as pd, streamlit as st
 import streamlit.components.v1 as components
 from detector import geometry, pattern_target, pattern_confidence, pattern_status
 
+def major_support_resistance(df, H, L):
+    cmp=float(df["Close"].iloc[-1])
+    atr=float((df["High"]-df["Low"]).rolling(14).mean().iloc[-1]) if len(df)>=14 else float((df["High"]-df["Low"]).mean())
+    tol=max(cmp*0.0075, atr*0.45)
+    def best(indices, col):
+        vals=sorted(float(df[col].iloc[i]) for i in indices[-30:])
+        zones=[]
+        for v in vals:
+            if not zones or abs(v-zones[-1]["center"])>tol:
+                zones.append({"vals":[v],"center":v})
+            else:
+                zones[-1]["vals"].append(v)
+                zones[-1]["center"]=sum(zones[-1]["vals"])/len(zones[-1]["vals"])
+        for z in zones:
+            z["low"]=min(z["vals"])-.35*tol
+            z["high"]=max(z["vals"])+.35*tol
+            z["touches"]=len(z["vals"])
+            z["strength"]=min(100,30+min(5,z["touches"])*12)
+        return max(zones,key=lambda z:(z["strength"],z["touches"])) if zones else None
+    return best(L,"Low"), best(H,"High")
+
+
 st.set_page_config(page_title="Chart Pattern Scanner", page_icon="📈", layout="wide")
 
 UNIVERSES={
@@ -112,7 +134,9 @@ def render_lightweight_chart(df, pattern, direction, details, H, L, confidence):
             "entry":details["entry"],
             "stop":details["stop"],
             "target1":details["target1"],
-            "target2":details["target2"]
+            "target2":details["target2"],
+            "support":(details.get("support") or {}).get("center"),
+            "resistance":(details.get("resistance") or {}).get("center")
         },
         "pattern":pattern,
         "direction":direction,
@@ -174,6 +198,8 @@ addLine('Entry', '#4da3ff', 2, LightweightCharts.LineStyle.Dashed, D.levels.entr
 addLine('Stop', '#ef5350', 2, LightweightCharts.LineStyle.Dashed, D.levels.stop);
 addLine('Target 1', '#26a69a', 2, LightweightCharts.LineStyle.Dashed, D.levels.target1);
 addLine('Target 2', '#9ccc65', 2, LightweightCharts.LineStyle.Dotted, D.levels.target2);
+addLine('Major Support', '#42a5f5', 2, LightweightCharts.LineStyle.Solid, D.levels.support);
+addLine('Major Resistance', '#ffb74d', 2, LightweightCharts.LineStyle.Solid, D.levels.resistance);
 
 function regression(points){
     if(points.length<2) return null;
@@ -267,12 +293,16 @@ if scan:
             df=get_prices(sym+".NS",timeframe,candles)
             if len(df)<max(30,min(candles,45)): continue
             found,strength,H,L=geometry(df)
+            support,resistance=major_support_resistance(df,H,L)
             selected=[(p,d) for p,d in found if view=="All" or d==view]
             if selected:
                 eligible=[]
                 for p,d in selected:
                     score=pattern_confidence(df,p,d,H,L)
                     details=pattern_target(df,p,d,H,L)
+                    if isinstance(details,dict):
+                        details["support"]=support
+                        details["resistance"]=resistance
                     rr=None
                     if details and details.get("stop") is not None and details.get("target1") is not None:
                         risk=abs(float(details["entry"])-float(details["stop"]))
@@ -319,25 +349,11 @@ if r.empty:
 st.subheader("Detected patterns")
 st.caption("One row per stock. With the 1:2 filter enabled, only stocks with at least one detected pattern offering R/R to Target 1 of 1:2 or better are shown.")
 
-show=r[["Stock","Timeframe","Candles","Pattern","Status","Bias","Confidence","Pattern Confidence","Best R/R to T1"]].copy()
+show=r[["Stock","Timeframe","Candles","Pattern","Status","Bias","Confidence"]].copy()
 
 # Keep confidence numeric while sorting so the displayed table is truly
 # ordered from strongest pattern-quality score to weakest.
-show["Pattern Confidence"]=pd.to_numeric(show["Pattern Confidence"], errors="coerce")
-show["Best R/R to T1"]=pd.to_numeric(show["Best R/R to T1"], errors="coerce")
-show=show.sort_values(
-    by=["Pattern Confidence", "Best R/R to T1", "Stock"],
-    ascending=[False, False, True],
-    kind="stable"
-).reset_index(drop=True)
-
-# Format only after sorting.
-show["Pattern Confidence"]=show["Pattern Confidence"].map(
-    lambda x:f"{x:.1f}" if pd.notna(x) else "—"
-)
-show["Best R/R to T1"]=show["Best R/R to T1"].map(
-    lambda x:f"1:{x:.2f}" if pd.notna(x) else "—"
-)
+show=show.sort_values(by=["Pattern Confidence","Stock"],ascending=[False,True],kind="stable").reset_index(drop=True)
 
 st.dataframe(
     show,
@@ -384,6 +400,10 @@ if st.session_state.get("selected"):
     confidence=pattern_confidence(df,pat,direction,H,L)
     status=pattern_status(df,pat,direction,H,L)
     details=pattern_target(df,pat,direction,H,L)
+    support,resistance=major_support_resistance(df,H,L)
+    if isinstance(details,dict):
+        details["support"]=support
+        details["resistance"]=resistance
     if details is None:
         st.error("Not enough data to calculate targets.")
         st.stop()
