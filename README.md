@@ -1,8 +1,8 @@
-# Chart Pattern Scanner
+# Chart Pattern Scanner — PatternPy Edition
 
-Free Streamlit scanner for the selected NSE universes.
+This version uses **PatternPy as the pattern-candidate engine** and a separate validation/scoring layer for this scanner.
 
-## Patterns
+Pattern families shown by the application:
 - Double Top
 - Double Bottom
 - Head and Shoulders
@@ -12,15 +12,14 @@ Free Streamlit scanner for the selected NSE universes.
 - Rising Channel
 - Falling Channel
 
-## UI
-- NIFTY 50, NIFTY Next 50, NIFTY Midcap 150, NIFTY Smallcap 250
-- Daily / Weekly / Monthly candles with realistic candle-count presets
-- All / Bullish / Bearish filter
-- Optional minimum 1:2 R/R-to-Target-1 filter
-- One result row per stock; multiple patterns are comma-separated
-- Results sorted by best pattern confidence
-- View opens pattern details and a free Lightweight Charts candlestick chart
-- Major support/resistance, entry, CMP, targets, stop and R:R shown in details
+PatternPy is used for candidate recognition of tops/bottoms, H&S and channels. Flags remain scanner-specific because PatternPy does not provide a flag detector.
 
-Run with:
+The scanner then validates the candidate using price structure, ATR tolerance, spacing, neckline/reaction, channel fit/containment and recent-break checks before displaying it.
+
+## Run
+`pip install -r requirements.txt`
 `streamlit run app.py`
+
+## Attribution / license
+PatternPy: https://github.com/keithorange/PatternPy
+PatternPy is licensed CC BY-NC-SA 4.0. This project is intended for personal, non-commercial use.

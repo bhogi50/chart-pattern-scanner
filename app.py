@@ -282,7 +282,7 @@ with st.sidebar:
     timeframe=st.selectbox("Pattern timeframe",list(CANDLE_OPTIONS))
     candles=st.selectbox("Number of candles",CANDLE_OPTIONS[timeframe],index=CANDLE_OPTIONS[timeframe].index(
         {"Daily":100,"Weekly":52,"Monthly":36}[timeframe]))
-    view=st.radio("Direction filter",["All","Bullish","Bearish"])
+    view=st.radio("Direction filter",["All","Bullish","Bearish","Neutral"])
     min_rr_filter=st.checkbox("Only setups with minimum R/R 1:2",value=True)
     scan=st.button("🔎 SCAN PATTERNS",type="primary",use_container_width=True)
     st.caption(f"{candles} {timeframe.lower()} candles will be used for the scan.")
@@ -320,10 +320,10 @@ if scan:
                     dirs=sorted(set(x["bias"] for x in eligible))
                     rows.append({
                         "Stock":sym, "Timeframe":timeframe, "Candles":len(df),
-                        "Pattern":", ".join(x["pattern"] for x in eligible),
-                        "Status":", ".join(x["status"] for x in eligible),
-                        "Bias":", ".join(x["bias"] for x in eligible),
-                        "Confidence":", ".join(f'{x["confidence"]:.1f}%' for x in eligible),
+                        "Pattern":"\n".join(x["pattern"] for x in eligible),
+                        "Status":"\n".join(x["status"] for x in eligible),
+                        "Bias":"\n".join(x["bias"] for x in eligible),
+                        "Confidence":"\n".join(f'{x["confidence"]:.1f}%' for x in eligible),
                         "Pattern Confidence":max(x["confidence"] for x in eligible),
                         "Best R/R to T1":max((x["rr"] for x in eligible if x["rr"] is not None), default=None)
                     })
@@ -351,7 +351,7 @@ if r.empty:
     st.stop()
 
 st.subheader("Detected patterns")
-st.caption("One row per stock. Multiple detected patterns are combined in the same row. With the 1:2 filter enabled, only setups with R/R to Target 1 of at least 1:2 are shown.")
+st.caption("One row per stock. With the 1:2 filter enabled, only stocks with at least one detected pattern offering R/R to Target 1 of 1:2 or better are shown.")
 
 show=r[["Stock","Timeframe","Candles","Pattern","Status","Bias","Confidence"]].copy()
 # Sort by the best detected pattern confidence without exposing the helper column.
@@ -378,6 +378,8 @@ st.dataframe(
         "Status": st.column_config.TextColumn("Status", width="medium"),
         "Bias": st.column_config.TextColumn("Bias", width="medium"),
         "Confidence": st.column_config.TextColumn("Confidence", width="medium"),
+        "Pattern Confidence": st.column_config.TextColumn("Best Pattern Confidence", width="medium"),
+        "Best R/R to T1": st.column_config.TextColumn("Best R/R to T1", width="small"),
     },
 )
 
@@ -394,7 +396,7 @@ if st.session_state.get("selected"):
         st.stop()
 
     found,strength,H,L=geometry(df)
-    available=[(p,d) for p,d in found if p in [x.strip() for x in str(row["Pattern"]).split(",")]]
+    available=[(p,d) for p,d in found if p in str(row["Pattern"]).split("\n")]
     if not available:
         st.warning("The pattern is no longer detected on the latest data. Please scan again.")
         st.stop()
@@ -420,19 +422,19 @@ if st.session_state.get("selected"):
     def money(x):
         return "—" if x is None else f"₹{float(x):,.2f}"
 
-    risk=abs(details["entry"]-details["stop"]) if details["stop"] is not None else 0.0
-    reward=abs(details["target1"]-details["entry"])
-    rr=reward/risk if risk else None
-
     levels = pd.DataFrame([
+        ["Current", money(details["current"])],
         ["Entry / Breakout", money(details["entry"])],
-        ["CMP", money(details["current"])],
+        ["Stop / Invalidation", money(details["stop"])],
         ["Target 1", money(details["target1"])],
         ["Target 2", money(details["target2"])],
-        ["Stop loss", money(details["stop"])],
-        ["R:R", (f"1:{rr:.2f}" if rr is not None else "—")],
-    ], columns=["Level", "Value"])
+    ], columns=["Level", "Price"])
+
     st.table(levels)
+
+    risk=abs(details["entry"]-details["stop"]) if details["stop"] is not None else 0
+    reward=abs(details["target1"]-details["entry"])
+    rr=reward/risk if risk else None
     st.info(
         f"Pattern: **{pat}** · Status: **{status}** · Bias: **{direction}** · "
         f"Pattern confidence: **{confidence:.1f}%** · "
