@@ -34,24 +34,41 @@ def patternpy(df):
     x=detect_channel(x,window=3)
     return x
 
-def results(x):
-    out=[]
+def latest_results(x):
+    # PatternPy writes detections on individual historical rows. For the scanner
+    # we report only the most recent PatternPy detection, rather than every
+    # historical label found in the selected candle window. No new detection
+    # logic is applied here.
+    detections=[]
     for col in ['head_shoulder_pattern','double_pattern','channel_pattern']:
-        if col in x.columns:
-            for v in x[col].dropna().astype(str):
-                if v in BIAS and v not in out: out.append(v)
-    return out
+        if col not in x.columns:
+            continue
+        for idx, value in x[col].items():
+            if pd.notna(value) and str(value) in BIAS:
+                detections.append((pd.Timestamp(idx), str(value), col))
+    if not detections:
+        return []
+    latest_time=max(t[0] for t in detections)
+    latest=[p for t,p,_ in detections if t == latest_time]
+    return list(dict.fromkeys(latest))
 
 def chart(symbol,tf,df):
-    x=patternpy(df); fig=go.Figure(go.Candlestick(x=x.index,open=x.Open,high=x.High,low=x.Low,close=x.Close,name=symbol))
-    for col in ['head_shoulder_pattern','double_pattern','channel_pattern']:
-        if col not in x.columns: continue
-        for pat in x[col].dropna().astype(str).unique():
-            if pat not in BIAS: continue
-            idx=x.index[x[col].astype(str)==pat]
-            if len(idx)==0: continue
-            vals=[float(x.loc[i,'Low'] if BIAS[pat]=='Bullish' else x.loc[i,'High']) for i in idx]
-            fig.add_trace(go.Scatter(x=idx,y=vals,mode='markers+text',text=[pat]*len(idx),textposition='bottom center' if BIAS[pat]=='Bullish' else 'top center',name=pat))
+    x=patternpy(df)
+    pats=latest_results(x)
+    fig=go.Figure(go.Candlestick(x=x.index,open=x.Open,high=x.High,low=x.Low,close=x.Close,name=symbol))
+    # Visualize only the latest PatternPy detection(s) shown in the table.
+    for pat in pats:
+        matches=[]
+        for col in ['head_shoulder_pattern','double_pattern','channel_pattern']:
+            if col in x.columns:
+                mask=x[col].astype(str).eq(pat)
+                matches.extend(list(x.index[mask]))
+        if not matches:
+            continue
+        latest_time=max(pd.Timestamp(i) for i in matches)
+        idx=[i for i in matches if pd.Timestamp(i)==latest_time]
+        vals=[float(x.loc[i,'Low'] if BIAS[pat]=='Bullish' else x.loc[i,'High']) for i in idx]
+        fig.add_trace(go.Scatter(x=idx,y=vals,mode='markers+text',text=[pat]*len(idx),textposition='bottom center' if BIAS[pat]=='Bullish' else 'top center',name=pat))
     fig.update_layout(title=f'{symbol} — {tf}',xaxis_rangeslider_visible=False,height=700,margin=dict(l=20,r=20,t=60,b=20))
     st.plotly_chart(fig,use_container_width=True)
 
@@ -72,7 +89,7 @@ if scan:
         try:
             d=prices(s+'.NS',tf,n)
             if d.empty: continue
-            ps=[p for p in results(patternpy(d)) if direction=='All' or BIAS[p]==direction]
+            ps=[p for p in latest_results(patternpy(d)) if direction=='All' or BIAS[p]==direction]
             if ps: rows.append({'Stock':s,'Pattern':', '.join(ps)})
         except Exception: pass
         bar.progress(i/len(syms))
@@ -90,5 +107,5 @@ if 'results' in st.session_state:
 if st.session_state.get('selected'):
     s=st.session_state.selected; st.divider(); st.subheader(f'{s} — PatternPy chart')
     try:
-        d=prices(s+'.NS',tf,n); chart(s,tf,d); st.write('**PatternPy result:** '+(', '.join(results(patternpy(d))) or 'None'))
+        d=prices(s+'.NS',tf,n); chart(s,tf,d); st.write('**Latest PatternPy result:** '+(', '.join(latest_results(patternpy(d))) or 'None'))
     except Exception as e: st.error(f'Unable to render chart: {e}')
