@@ -1,7 +1,7 @@
 
 import io, json, html, requests, pandas as pd, streamlit as st
 import streamlit.components.v1 as components
-from detector import geometry, pattern_target, pattern_confidence, pattern_status
+from detector import geometry, pattern_target, pattern_confidence, pattern_status, pattern_points
 
 def major_support_resistance(df, H, L):
     cmp=float(df["Close"].iloc[-1])
@@ -63,7 +63,7 @@ def get_prices(symbol,timeframe,candle_count):
     return x.dropna(subset=list(needed)).tail(candle_count)
 
 
-def render_lightweight_chart(df, pattern, direction, details, H, L, confidence):
+def render_lightweight_chart(df, pattern, direction, details, H, L, confidence, points=None):
     candles=[]
     for idx,row in df.iterrows():
         try:
@@ -78,42 +78,55 @@ def render_lightweight_chart(df, pattern, direction, details, H, L, confidence):
         except Exception:
             pass
 
-    # Swing points are used to draw the actual detected pattern geometry.
+    # Swing points are used for the small H/L circle markers on the chart.
     highs=[{"time":int(pd.Timestamp(df.index[i]).timestamp()),"value":float(df["High"].iloc[i])}
            for i in H if i < len(df)]
     lows=[{"time":int(pd.Timestamp(df.index[i]).timestamp()),"value":float(df["Low"].iloc[i])}
           for i in L if i < len(df)]
 
-    # Select relevant swing points for pattern rendering.
-    ph = highs[-5:]
-    pl = lows[-5:]
+    def pt(i, col):
+        i=int(i)
+        return {"time":int(pd.Timestamp(df.index[i]).timestamp()), "value":float(df[col].iloc[i])}
+
     geometry_lines=[]
 
-    def line_from_points(points):
-        if len(points)<2:
-            return None
-        x1,x2=points[0]["time"],points[-1]["time"]
-        y1,y2=points[0]["value"],points[-1]["value"]
-        return {"start":{"time":x1,"value":y1},"end":{"time":x2,"value":y2}}
-
-    if pattern in ("Double Top","Double Bottom"):
-        pts = ph[-2:] if pattern=="Double Top" else pl[-2:]
-        if len(pts)>=2:
-            geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
-    elif pattern in ("Head and Shoulders","Inverse Head and Shoulders"):
-        pts=ph[-3:] if pattern=="Head and Shoulders" else pl[-3:]
-        if len(pts)>=3:
-            geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
-    elif pattern in ("Rising Channel","Falling Channel"):
-        if len(ph)>=2:
-            geometry_lines.append({"type":"trend","points":ph[-5:],"label":"Resistance"})
-        if len(pl)>=2:
-            geometry_lines.append({"type":"trend","points":pl[-5:],"label":"Support"})
-    elif pattern in ("Bullish Flag","Bearish Flag"):
-        if len(ph)>=2:
-            geometry_lines.append({"type":"trend","points":ph[-3:],"label":"Resistance"})
-        if len(pl)>=2:
-            geometry_lines.append({"type":"trend","points":pl[-3:],"label":"Support"})
+    # The pattern-drawing geometry now comes directly from `points`, which is
+    # produced by detector.pattern_points() using the *exact same candidate*
+    # that pattern_confidence()/pattern_target() scored — so the chart can no
+    # longer show a different pair of swings than the ones actually evaluated.
+    if points:
+        ptype=points.get("type")
+        if ptype=="double":
+            i1,i2=points["indices"]
+            col="High" if pattern=="Double Top" else "Low"
+            geometry_lines.append({"type":"zigzag","points":[pt(i1,col),pt(i2,col)],"label":pattern})
+            ni=points["neck_idx"]
+            geometry_lines.append({"type":"horizontal",
+                                    "points":[{"time":pt(ni,"High")["time"],"value":points["neckline"]},
+                                              {"time":pt(i2,col)["time"],"value":points["neckline"]}],
+                                    "label":"Neckline"})
+        elif ptype=="hs":
+            l_i,h_i,r_i=points["indices"]
+            col="High" if pattern=="Head and Shoulders" else "Low"
+            geometry_lines.append({"type":"zigzag","points":[pt(l_i,col),pt(h_i,col),pt(r_i,col)],"label":pattern})
+            n1,n2=points["neck_idx"]
+            ncol="Low" if pattern=="Head and Shoulders" else "High"
+            geometry_lines.append({"type":"trend",
+                                    "points":[pt(n1,ncol),pt(n2,ncol)],
+                                    "label":"Neckline"})
+        elif ptype=="channel":
+            hi=points["hi"]; lo=points["lo"]
+            if len(hi)>=2:
+                geometry_lines.append({"type":"trend","points":[pt(i,"High") for i in hi],"label":"Resistance"})
+            if len(lo)>=2:
+                geometry_lines.append({"type":"trend","points":[pt(i,"Low") for i in lo],"label":"Support"})
+        elif ptype=="flag":
+            ps,pe=points["pole_start"],points["pole_end"]
+            cs,ce=points["consolidation_start"],points["consolidation_end"]
+            pole_col="Low" if direction=="Bullish" else "High"
+            geometry_lines.append({"type":"trend","points":[pt(ps,pole_col),pt(pe,pole_col)],"label":"Impulse"})
+            cons_col="High" if direction=="Bullish" else "Low"
+            geometry_lines.append({"type":"trend","points":[pt(cs,cons_col),pt(ce,cons_col)],"label":"Consolidation"})
 
     payload={
         "candles":candles,
@@ -430,13 +443,22 @@ if st.session_state.get("selected"):
     )
     st.caption("Confidence measures pattern quality; R/R is a reward-to-risk ratio, not a probability of hitting the target.")
 
+    vc = details.get("volume_confirmed")
+    vr = details.get("volume_ratio")
+    if vc is None:
+        st.caption("Volume confirmation: not available for this data.")
+    else:
+        vtxt = "confirmed" if vc else "not confirmed"
+        st.caption(f"Volume confirmation: **{vtxt}** (latest candle at {vr:.2f}× its 20-period average).")
+
     st.caption(
         f"Exact levels — Current: {money(details['current'])} · "
         f"Entry: {money(details['entry'])} · Stop: {money(details['stop'])} · "
         f"T1: {money(details['target1'])} · T2: {money(details['target2'])}"
     )
 
-    render_lightweight_chart(df, pat, direction, details, H, L, confidence)
+    chart_points = pattern_points(df, pat, direction, H, L)
+    render_lightweight_chart(df, pat, direction, details, H, L, confidence, chart_points)
     if st.button("← Close details"):
         st.session_state.selected=None
         st.rerun()

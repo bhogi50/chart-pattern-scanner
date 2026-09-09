@@ -11,6 +11,24 @@ ALLOWED_PATTERNS = (
     "Falling Channel",
 )
 
+# ---------------------------------------------------------------------------
+# Tunable thresholds. Pulled to the top so they can be re-calibrated against
+# a real backtest (see backtest.py) instead of buried as magic numbers.
+# ---------------------------------------------------------------------------
+RECENT_PIVOT_WINDOW = 12          # how many recent swing points are searched for a candidate
+DOUBLE_TOL_FLOOR = 0.018          # min relative similarity tolerance between the two peaks/troughs
+DOUBLE_TOL_CAP = 0.06             # max relative similarity tolerance
+DOUBLE_TOL_ATR_MULT = 1.1         # tolerance scales with ATR/price
+DOUBLE_MIN_REACTION_ATR_MULT = 1.3
+DOUBLE_MIN_REACTION_PCT = 0.02
+HS_TOL_FLOOR = 0.02               # shoulder symmetry tolerance (relative)
+HS_TOL_CAP = 0.07
+HS_TOL_ATR_MULT = 1.2
+HS_MIN_PROMINENCE_ATR_MULT = 1.2  # head must clear shoulders by at least this much ATR
+HS_MIN_PROMINENCE_PCT = 0.02
+VOLUME_LOOKBACK = 20
+VOLUME_BREAKOUT_MULT = 1.2        # breakout candle volume vs its trailing average
+
 
 def pivots(df, left=3, right=3):
     if df is None or len(df) < left + right + 3:
@@ -66,16 +84,46 @@ def _atr(df, period=14):
     return float(np.mean(tr[-min(period,len(tr)):]))
 
 
+def _volume_ratio(df, idx, lookback=VOLUME_LOOKBACK):
+    """Volume on candle `idx` relative to its trailing average. None if no
+    Volume column, insufficient history, or non-positive average (illiquid
+    data)."""
+    if df is None or "Volume" not in df.columns or idx is None:
+        return None
+    v = df["Volume"].to_numpy(float)
+    idx = int(idx)
+    if idx < 0 or idx >= len(v):
+        return None
+    start = max(0, idx - lookback)
+    if idx <= start:
+        return None
+    avg = np.nanmean(v[start:idx])
+    if not np.isfinite(avg) or avg <= 0 or not np.isfinite(v[idx]):
+        return None
+    return float(v[idx] / avg)
+
+
+def _breakout_volume_confirmed(df, entry_idx=None):
+    """Checks volume on/near the most recent candle (proxy for the breakout
+    candle) against its trailing average. Returns (confirmed: bool|None,
+    ratio: float|None). None means "no volume data available", not "failed"."""
+    idx = len(df) - 1 if entry_idx is None else entry_idx
+    ratio = _volume_ratio(df, idx)
+    if ratio is None:
+        return None, None
+    return ratio >= VOLUME_BREAKOUT_MULT, ratio
+
+
 def _double_candidate(df, side, piv):
     """Return the strongest structurally valid double-top/bottom candidate."""
     if len(piv) < 2:
         return None
     h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
-    c=df["Close"].to_numpy(float); atr=max(_atr(df),1e-9)
+    atr=max(_atr(df),1e-9)
     candidates=[]
     # Do not restrict to the last two pivots: a minor pivot can sit between the
     # two meaningful bottoms/tops. Search a realistic recent window.
-    recent=piv[-8:]
+    recent=piv[-RECENT_PIVOT_WINDOW:]
     for ai in range(len(recent)-2, -1, -1):
         for bi in range(ai+1, len(recent)):
             a,b=recent[ai],recent[bi]
@@ -84,7 +132,6 @@ def _double_candidate(df, side, piv):
                 continue
             if side=="bottom":
                 va,vb=l[a],l[b]
-                vals=l[a:b+1]
                 neck_idx=a+int(np.argmax(h[a:b+1]))
                 neck=float(h[neck_idx])
                 extreme=float(min(va,vb))
@@ -97,13 +144,15 @@ def _double_candidate(df, side, piv):
                 extreme=float(max(va,vb))
                 rise=extreme-neck
                 similarity=abs(va-vb)/max((va+vb)/2,1e-9)
-            # Volatility-aware similarity: allow a little more room for volatile
-            # stocks, but never let two clearly different levels qualify.
-            tol=min(0.045, max(0.012, 0.55*atr/max(abs((va+vb)/2),1e-9)))
+            # Volatility-aware similarity: real double tops/bottoms rarely land
+            # on the exact same print. Scale tolerance with ATR but keep a
+            # sane floor/ceiling so we don't accept clearly different levels
+            # on very volatile names or reject clean patterns on very calm ones.
+            tol=min(DOUBLE_TOL_CAP, max(DOUBLE_TOL_FLOOR, DOUBLE_TOL_ATR_MULT*atr/max(abs((va+vb)/2),1e-9)))
             if similarity > tol:
                 continue
             # The middle reaction must be meaningful, not a flat V/noise move.
-            min_reaction=max(1.6*atr, 0.025*max(abs((va+vb)/2),1e-9))
+            min_reaction=max(DOUBLE_MIN_REACTION_ATR_MULT*atr, DOUBLE_MIN_REACTION_PCT*max(abs((va+vb)/2),1e-9))
             if rise < min_reaction:
                 continue
             # Neckline must occur between the two extremes and leave a real swing.
@@ -121,6 +170,75 @@ def _double_candidate(df, side, piv):
     if not candidates:
         return None
     return max(candidates,key=lambda x:x[0])[1]
+
+
+def _hs_candidate(df, side, piv, piv_opp):
+    """Structurally-searched Head & Shoulders / Inverse H&S candidate.
+
+    side: "head" (H&S, uses highs for shoulders/head, lows for neckline) or
+          "inverse" (uses lows for shoulders/head, highs for neckline).
+    piv: pivot indices of the extreme type (H for "head", L for "inverse").
+    piv_opp: pivot indices of the opposite type, used to locate the neckline.
+    Searches triples instead of blindly taking the last 3 pivots, so a minor
+    wiggle between the true shoulders and head no longer hides the pattern.
+    """
+    if len(piv) < 3:
+        return None
+    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
+    atr=max(_atr(df),1e-9)
+    recent=piv[-RECENT_PIVOT_WINDOW:]
+    is_head = side=="head"
+    vals = h if is_head else l
+    candidates=[]
+    for li in range(len(recent)-2):
+        for hi in range(li+1, len(recent)-1):
+            for ri in range(hi+1, len(recent)):
+                lft, head, rgt = recent[li], recent[hi], recent[ri]
+                gap = rgt - lft
+                if gap < 8 or gap > min(140, max(25, len(df)-5)):
+                    continue
+                v_l, v_h, v_r = vals[lft], vals[head], vals[rgt]
+                if is_head:
+                    if not (v_h > v_l and v_h > v_r):
+                        continue
+                    prominence = v_h - max(v_l, v_r)
+                else:
+                    if not (v_h < v_l and v_h < v_r):
+                        continue
+                    prominence = min(v_l, v_r) - v_h
+                mid = (v_l+v_r)/2
+                similarity = abs(v_l-v_r)/max(abs(mid),1e-9)
+                tol = min(HS_TOL_CAP, max(HS_TOL_FLOOR, HS_TOL_ATR_MULT*atr/max(abs(mid),1e-9)))
+                if similarity > tol:
+                    continue
+                min_prom = max(HS_MIN_PROMINENCE_ATR_MULT*atr, HS_MIN_PROMINENCE_PCT*max(abs(v_h),1e-9))
+                if prominence < min_prom:
+                    continue
+                # Neckline: the two opposite-type pivots bracketing the head
+                # (the reaction lows for H&S, reaction highs for inverse).
+                opp_left = [p for p in piv_opp if lft < p < head]
+                opp_right = [p for p in piv_opp if head < p < rgt]
+                if not opp_left or not opp_right:
+                    continue
+                n1_idx = opp_left[-1]
+                n2_idx = opp_right[0]
+                n1 = (l[n1_idx] if is_head else h[n1_idx])
+                n2 = (l[n2_idx] if is_head else h[n2_idx])
+                neckline = (n1+n2)/2
+                recency = max(0.0, 1.0-(len(df)-rgt)/max(len(df),1))
+                spacing = min(1.0, gap/35.0)
+                sim_score = max(0.0, 1.0-similarity/max(tol,1e-9))
+                prom_score = min(1.0, prominence/max(4*atr, 0.06*abs(v_h)))
+                score = 0.40*sim_score + 0.35*prom_score + 0.13*spacing + 0.12*recency
+                candidates.append((score, {
+                    "left":lft, "head":head, "right":rgt,
+                    "left_value":float(v_l), "head_value":float(v_h), "right_value":float(v_r),
+                    "neck1_idx":int(n1_idx), "neck2_idx":int(n2_idx),
+                    "neckline":float(neckline), "prominence":float(prominence), "tolerance":float(tol),
+                }))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x[0])[1]
 
 
 def _channel_candidate(df,H,L,kind):
@@ -192,8 +310,8 @@ def pattern_confidence(df,pattern,direction,H=None,L=None):
         return 0.0
     if H is None or L is None:
         H,L=pivots(df)
-    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
     quality=50.0
+    breakout_idx=None
 
     if pattern in ("Double Top","Double Bottom"):
         cand=_double_candidate(df,"top" if pattern=="Double Top" else "bottom",H if pattern=="Double Top" else L)
@@ -205,16 +323,21 @@ def pattern_confidence(df,pattern,direction,H=None,L=None):
         reaction_score=_clamp(cand["height"]/max(4*_atr(df),0.05*abs(cand["neckline"]))*100)
         spacing=_clamp(abs(cand["second"]-cand["first"])/25*100)
         quality=.55*sim_score+.30*reaction_score+.15*spacing
+        breakout_idx=cand["second"]
 
     elif pattern in ("Head and Shoulders","Inverse Head and Shoulders"):
-        idx=H[-3:] if pattern=="Head and Shoulders" else L[-3:]
-        if len(idx)>=3:
-            vals=(h[idx] if pattern=="Head and Shoulders" else l[idx])
-            shoulders=_clamp(100-abs(vals[0]-vals[2])/max(abs(np.mean([vals[0],vals[2]])),1e-9)*1000)
-            head_gap=((vals[1]-max(vals[0],vals[2]))/max(abs(vals[1]),1e-9)*100
-                      if pattern=="Head and Shoulders"
-                      else (min(vals[0],vals[2])-vals[1])/max(abs(vals[1]),1e-9)*100)
-            quality=.55*shoulders+.45*_clamp(head_gap*3)
+        cand=_hs_candidate(df,"head" if pattern=="Head and Shoulders" else "inverse",
+                            H if pattern=="Head and Shoulders" else L,
+                            L if pattern=="Head and Shoulders" else H)
+        if not cand:
+            return 0.0
+        mid=(cand["left_value"]+cand["right_value"])/2
+        similarity=abs(cand["left_value"]-cand["right_value"])/max(abs(mid),1e-9)
+        sim_score=_clamp(100*(1-similarity/max(cand["tolerance"],1e-9)))
+        prom_score=_clamp(cand["prominence"]/max(4*_atr(df),0.06*abs(cand["head_value"]))*100)
+        spacing=_clamp((cand["right"]-cand["left"])/35*100)
+        quality=.45*sim_score+.40*prom_score+.15*spacing
+        breakout_idx=cand["right"]
 
     elif pattern in ("Rising Channel","Falling Channel"):
         cand=_channel_candidate(df,H,L,pattern)
@@ -232,11 +355,27 @@ def pattern_confidence(df,pattern,direction,H=None,L=None):
         impulse=abs(p[-1]/p[0]-1) if p[0] else 0
         consolidation=(q.max()-q.min())/max(abs(q.mean()),1e-9)
         quality=.55*_clamp(impulse*450)+.45*_clamp(100-consolidation*700)
+        breakout_idx=len(df)-1
 
     touch=_clamp(35+min(len(H)+len(L),12)*4)
     last_pivot=max((H[-1] if H else 0),(L[-1] if L else 0))
     recency=_clamp(100-max(0,len(df)-last_pivot)*1.2)
-    return round(_clamp(.50*50+.40*quality+.07*touch+.03*recency),1)
+
+    # Volume is a soft confirmation signal, not a hard gate: absence of
+    # Volume data (None) contributes nothing rather than penalizing.
+    vol_bonus=0.0
+    confirmed,_ratio=_breakout_volume_confirmed(df, breakout_idx)
+    if confirmed is True:
+        vol_bonus=5.0
+    elif confirmed is False:
+        vol_bonus=-5.0
+
+    # NOTE: this used to be `.50*50` (a hardcoded 25 regardless of pattern
+    # quality), which capped every confidence score at 75% no matter how
+    # clean the pattern was. Quality now actually drives the bulk of the
+    # score, with touch/recency/volume as secondary adjustments.
+    base=.70*quality+.18*touch+.07*recency+vol_bonus
+    return round(_clamp(base),1)
 
 
 def geometry(df):
@@ -251,21 +390,15 @@ def geometry(df):
         if _channel_candidate(df,H,L,kind):
             found.append((kind,direction))
 
-    db=_double_candidate(df,"bottom",L)
-    if db:
+    if _double_candidate(df,"bottom",L):
         found.append(("Double Bottom","Bullish"))
-    dt=_double_candidate(df,"top",H)
-    if dt:
+    if _double_candidate(df,"top",H):
         found.append(("Double Top","Bearish"))
 
-    if len(H)>=3:
-        a,b,d=H[-3:]
-        if h[b]>h[a] and h[b]>h[d] and _near(h[a],h[d],.08):
-            found.append(("Head and Shoulders","Bearish"))
-    if len(L)>=3:
-        a,b,d=L[-3:]
-        if l[b]<l[a] and l[b]<l[d] and _near(l[a],l[d],.08):
-            found.append(("Inverse Head and Shoulders","Bullish"))
+    if _hs_candidate(df,"head",H,L):
+        found.append(("Head and Shoulders","Bearish"))
+    if _hs_candidate(df,"inverse",L,H):
+        found.append(("Inverse Head and Shoulders","Bullish"))
 
     if len(df)>=25:
         p=c[-25:-10]; q=c[-10:]
@@ -277,6 +410,46 @@ def geometry(df):
     found=list(dict.fromkeys(x for x in found if x[0] in ALLOWED_PATTERNS))
     scores=[pattern_confidence(df,p,d,H,L) for p,d in found]
     return found,round(max(scores),1) if scores else 0.0,H,L
+
+
+def pattern_points(df, pattern, direction, H=None, L=None):
+    """Returns the *exact* swing indices/values a given pattern's confidence
+    and target were computed from, so the chart can draw the same geometry
+    that was actually scored instead of a naive 'last N pivots' guess."""
+    if pattern not in ALLOWED_PATTERNS or df is None or len(df)==0:
+        return None
+    if H is None or L is None:
+        H,L=pivots(df)
+
+    if pattern in ("Double Top","Double Bottom"):
+        cand=_double_candidate(df,"top" if pattern=="Double Top" else "bottom",H if pattern=="Double Top" else L)
+        if not cand:
+            return None
+        return {"type":"double","indices":[cand["first"],cand["second"]],
+                "values":[cand["first_value"],cand["second_value"]],
+                "neck_idx":cand["neck_idx"],"neckline":cand["neckline"]}
+
+    if pattern in ("Head and Shoulders","Inverse Head and Shoulders"):
+        cand=_hs_candidate(df,"head" if pattern=="Head and Shoulders" else "inverse",
+                            H if pattern=="Head and Shoulders" else L,
+                            L if pattern=="Head and Shoulders" else H)
+        if not cand:
+            return None
+        return {"type":"hs","indices":[cand["left"],cand["head"],cand["right"]],
+                "values":[cand["left_value"],cand["head_value"],cand["right_value"]],
+                "neck_idx":[cand["neck1_idx"],cand["neck2_idx"]],"neckline":cand["neckline"]}
+
+    if pattern in ("Rising Channel","Falling Channel"):
+        cand=_channel_candidate(df,H,L,pattern)
+        if not cand:
+            return None
+        return {"type":"channel","hi":cand["hi"],"lo":cand["lo"]}
+
+    if pattern in ("Bullish Flag","Bearish Flag") and len(df)>=25:
+        return {"type":"flag","pole_start":len(df)-25,"pole_end":len(df)-10,
+                "consolidation_start":len(df)-10,"consolidation_end":len(df)-1}
+
+    return None
 
 
 def pattern_status(df,pattern,direction,H=None,L=None):
@@ -326,18 +499,20 @@ def pattern_target(df,pattern,direction,H=None,L=None):
             height=max(top-neck,0)
             entry=neck; stop=top; t1=neck-height; t2=neck-1.618*height
             method="Neckline - pattern height"
-    elif pattern=="Head and Shoulders" and len(H)>=3 and len(L)>=2:
-        head=h[H[-2]]
-        neck=(min(l[L[-2]:H[-2]+1]) + min(l[H[-2]:H[-1]+1]))/2
-        height=max(head-neck,0)
-        entry=neck; stop=head; t1=neck-height; t2=neck-1.618*height
-        method="Head-to-neckline measured move"
-    elif pattern=="Inverse Head and Shoulders" and len(L)>=3 and len(H)>=2:
-        head=l[L[-2]]
-        neck=(max(h[H[-2]:L[-2]+1]) + max(h[L[-2]:L[-1]+1]))/2
-        height=max(neck-head,0)
-        entry=neck; stop=head; t1=neck+height; t2=neck+1.618*height
-        method="Head-to-neckline measured move"
+    elif pattern=="Head and Shoulders":
+        cand=_hs_candidate(df,"head",H,L)
+        if cand:
+            head=cand["head_value"]; neck=cand["neckline"]
+            height=max(head-neck,0)
+            entry=neck; stop=head; t1=neck-height; t2=neck-1.618*height
+            method="Head-to-neckline measured move"
+    elif pattern=="Inverse Head and Shoulders":
+        cand=_hs_candidate(df,"inverse",L,H)
+        if cand:
+            head=cand["head_value"]; neck=cand["neckline"]
+            height=max(neck-head,0)
+            entry=neck; stop=head; t1=neck+height; t2=neck+1.618*height
+            method="Head-to-neckline measured move"
     elif pattern in ("Bullish Flag","Bearish Flag") and len(df)>=25:
         pole=float(max(h[-25:-10])-min(l[-25:-10]))
         if direction=="Bullish":
@@ -365,4 +540,6 @@ def pattern_target(df,pattern,direction,H=None,L=None):
             t1=c+rng; t2=c-rng
         method="Recent 20-candle range fallback"
 
-    return {"current":c,"entry":entry,"stop":stop,"target1":t1,"target2":t2,"method":method}
+    volume_confirmed, volume_ratio = _breakout_volume_confirmed(df)
+    return {"current":c,"entry":entry,"stop":stop,"target1":t1,"target2":t2,"method":method,
+            "volume_confirmed":volume_confirmed,"volume_ratio":volume_ratio}
