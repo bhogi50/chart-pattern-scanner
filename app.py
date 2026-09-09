@@ -1,7 +1,7 @@
 
 import io, json, html, requests, pandas as pd, streamlit as st
 import streamlit.components.v1 as components
-from detector import geometry, pattern_target
+from detector import geometry, pattern_target, pattern_confidence
 
 st.set_page_config(page_title="Chart Pattern Scanner", page_icon="📈", layout="wide")
 
@@ -244,7 +244,6 @@ if scan:
             found,strength,H,L=geometry(df)
             selected=[(p,d) for p,d in found if view=="All" or d==view]
             if selected:
-                from detector import pattern_confidence
                 pattern_scores=[pattern_confidence(df,p,d,H,L) for p,d in selected]
                 dirs=sorted(set(d for _,d in selected))
                 rows.append({
@@ -257,7 +256,14 @@ if scan:
         except Exception:
             continue
         bar.progress(i/max(1,len(syms)))
-    st.session_state.results=pd.DataFrame(rows)
+    result_df=pd.DataFrame(rows)
+    if not result_df.empty:
+        result_df=result_df.sort_values(
+            by=["Pattern Confidence", "Stock"],
+            ascending=[False, True],
+            kind="stable"
+        ).reset_index(drop=True)
+    st.session_state.results=result_df
     st.session_state.scan_config=(universe,timeframe,candles,view)
     st.session_state.selected=None
 
@@ -303,7 +309,6 @@ if st.session_state.get("selected"):
         st.error("Price data could not be loaded for this stock. Please scan again.")
         st.stop()
 
-    from detector import pattern_confidence
     found,strength,H,L=geometry(df)
     available=[(p,d) for p,d in found if p in row["Patterns Detected"].split(", ")]
     if not available:
@@ -317,6 +322,7 @@ if st.session_state.get("selected"):
     labels=[p for p,_ in available]
     pat=st.selectbox("Pattern to inspect",labels)
     direction=dict(available)[pat]
+    confidence=pattern_confidence(df,pat,direction,H,L)
     details=pattern_target(df,pat,direction,H,L)
     if details is None:
         st.error("Not enough data to calculate targets.")
@@ -339,11 +345,11 @@ if st.session_state.get("selected"):
     reward=abs(details["target1"]-details["entry"])
     rr=reward/risk if risk else None
     st.info(
-        f"Pattern confidence: **__CONFIDENCE__** · "
+        f"Pattern confidence: **{confidence:.1f}%** · "
         f"Target method: **{details['method']}**" +
         (f" · R/R to T1: **1:{rr:.2f}**" if rr else "")
     )
-    st.caption("Confidence is a rule-based pattern-quality score, not a probability of profit.")
+    st.caption("Confidence is specific to the selected pattern and measures pattern quality; it is not a probability of profit.")
 
     st.caption(
         f"Exact levels — Current: {money(details['current'])} · "
