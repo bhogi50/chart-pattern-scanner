@@ -33,3 +33,5 @@ Selecting a stock shows its detected patterns. Selecting a pattern shows:
 - Candlestick chart
 
 Yahoo Finance data failures and empty datasets are handled without crashing.
+
+Target prices are displayed as complete rupee values with two decimal places; the detail layout avoids narrow metric cards on small screens.

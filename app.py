@@ -95,7 +95,19 @@ show=r[["Stock","Timeframe","Candles","Patterns Detected","Direction","Pattern S
 show["Pattern Strength"]=show["Pattern Strength"].map(lambda x:f"{x:.1f}")
 show=show.sort_values("Stock")
 
-st.dataframe(show,use_container_width=True,hide_index=True)
+st.dataframe(
+    show,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Stock": st.column_config.TextColumn("Stock", width="small"),
+        "Timeframe": st.column_config.TextColumn("Timeframe", width="small"),
+        "Candles": st.column_config.NumberColumn("Candles", width="small"),
+        "Patterns Detected": st.column_config.TextColumn("Patterns Detected", width="large"),
+        "Direction": st.column_config.TextColumn("Direction", width="medium"),
+        "Pattern Strength": st.column_config.TextColumn("Pattern Strength", width="medium"),
+    },
+)
 
 stock=st.selectbox("Select a stock to view details",["— Select —"]+show.Stock.tolist())
 if stock!="— Select —":
@@ -127,17 +139,29 @@ if st.session_state.get("selected"):
         st.error("Not enough data to calculate targets.")
         st.stop()
 
-    m1,m2,m3,m4,m5=st.columns(5)
-    m1.metric("Current",f"₹{details['current']:,.2f}")
-    m2.metric("Entry / Breakout",f"₹{details['entry']:,.2f}")
-    m3.metric("Stop / Invalidation",f"₹{details['stop']:,.2f}")
-    m4.metric("Target 1",f"₹{details['target1']:,.2f}")
-    m5.metric("Target 2",f"₹{details['target2']:,.2f}")
+    def money(x):
+        return "—" if x is None else f"₹{float(x):,.2f}"
+
+    levels = pd.DataFrame([
+        ["Current", money(details["current"])],
+        ["Entry / Breakout", money(details["entry"])],
+        ["Stop / Invalidation", money(details["stop"])],
+        ["Target 1", money(details["target1"])],
+        ["Target 2", money(details["target2"])],
+    ], columns=["Level", "Price"])
+
+    st.table(levels)
 
     risk=abs(details["entry"]-details["stop"]) if details["stop"] is not None else 0
     reward=abs(details["target1"]-details["entry"])
     rr=reward/risk if risk else None
     st.info(f"Target method: **{details['method']}**"+(f" · R/R to T1: **1:{rr:.2f}**" if rr else ""))
+
+    st.caption(
+        f"Exact levels — Current: {money(details['current'])} · "
+        f"Entry: {money(details['entry'])} · Stop: {money(details['stop'])} · "
+        f"T1: {money(details['target1'])} · T2: {money(details['target2'])}"
+    )
 
     fig=go.Figure(go.Candlestick(x=df.index,open=df.Open,high=df.High,low=df.Low,close=df.Close,name="Candles"))
     if H: fig.add_trace(go.Scatter(x=df.index[H],y=df.High.iloc[H],mode="markers",name="Swing High"))
