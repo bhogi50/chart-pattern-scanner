@@ -1,60 +1,78 @@
-# ASTA Tide-Wave Scanner V4
+# Chart Pattern Scanner
 
-Implements the three checklists shown in GEO PAN - SETUPS.pdf:
-- ASTA Triple Screen Setup
-- ASTA Swing Trader Setup
-- ASTA Momentum Trader Setup
+This version intentionally removes the complete ASTA setup engine.
 
-Sidebar:
-NIFTY 50 / NIFTY Next 50 / NIFTY Midcap 150 / NIFTY Smallcap 250
-Daily / Weekly / Monthly Tide
-All / Bullish / Bearish
-Setup filter
-Minimum confidence
-SCAN
+It is a **pure chart-pattern detector**.
 
-Timeframes:
-Daily Tide -> 4H Wave
-Weekly Tide -> Daily Wave
-Monthly Tide -> Weekly Wave
+## Universes
 
-The scanner includes RSI, Stochastic PCO/NCO, EMA 5/13/26, Bollinger Bands,
-volume, DI PCO/NCO, ADX, pivot-based chart patterns, Double Top/Bottom with
-minimum 8-candle separation, Fib-style structure check, and candlestick checks.
+- NIFTY 50
+- NIFTY Next 50
+- NIFTY Midcap 150
+- NIFTY Smallcap 250
 
-Confidence is a setup-quality score:
-Triple Screen 35/65 mandatory/supporting
-Swing 45/55
-Momentum 70/30
+## Pattern timeframes
 
-The PDF does not define exact formulas for TI, TLBO/TLBD, ATM PE/CE-TMJ, TMJ,
-or some discretionary terms. Those are labelled as proxies or left for a later
-data-provider integration rather than silently invented.
+The user selects the timeframe on which the pattern itself is detected:
 
-Data: Nifty Indices constituent CSV endpoints + Yahoo Finance OHLCV.
+- **Daily** → daily candles
+- **Weekly** → weekly candles
+- **Monthly** → monthly candles
+
+There is no Tide/Wave/ASTA confirmation in this version.
+
+### Why this timeframe design?
+
+A chart pattern is defined by the candles that form its geometry. Mixing a
+Daily pattern with a separate Wave/Tide engine would turn this into a
+multi-timeframe strategy rather than a pattern detector.
+
+The scan therefore answers one clean question:
+
+> "Does this stock currently contain this chart pattern on the selected
+> timeframe?"
+
+For example:
+- Daily scan → detects a Double Bottom from daily candles.
+- Weekly scan → detects a Double Bottom from weekly candles.
+- Monthly scan → detects a Double Bottom from monthly candles.
+
+The application fetches a longer history for higher timeframes so the detector
+has enough candles to establish swing structure.
+
+## Patterns
+
+- Symmetrical Triangle
+- Ascending Triangle
+- Descending Triangle
+- Rising Wedge
+- Falling Wedge
+- Rising Channel
+- Falling Channel
+- Double Bottom
+- Double Top
+- Bullish Flag
+- Bearish Flag
+
+## Detection approach
+
+1. Identify swing highs/lows.
+2. Build recent structural trendlines.
+3. Measure slopes and convergence.
+4. Classify triangle/wedge/channel geometry.
+5. Detect repeated swing highs/lows for Double Top/Bottom.
+6. Detect strong move + consolidation for flags.
+7. Draw the detected structure directly on the candlestick chart.
+
+The displayed **Pattern Strength** is a geometry/structure score, not a
+probability of profit.
+
+## Important data note
+
+Yahoo Finance is used for OHLCV in this prototype. Before using the scanner
+for serious historical research, the data source should be replaced or
+validated against a reliable NSE market-data provider.
 
 
-## Annotated chart
-
-The stock chart now overlays:
-- candlesticks
-- swing-high / swing-low pivot markers
-- detected pattern support/resistance lines
-- current-price / entry reference
-- stop reference
-- target reference
-- setup name, direction and confidence in the chart title
-- detected pattern name and geometry score below the chart
-
-The overlay is deliberately labelled as a **reference**, not a broker order recommendation.
-
-
-### RSI interpretation
-
-For ASTA Momentum Trader:
-- Bullish momentum condition: RSI > 40
-- Bearish momentum condition: RSI < 60
-
-These are deliberately not treated as RSI >50 / RSI <50. The 40–60 range can
-therefore qualify for either directional setup when the remaining conditions
-provide the directional confirmation.
+## Expanded detector
+Added Head & Shoulders, Inverse Head & Shoulders, Rectangle, Cup & Handle, Bullish/Bearish Pennants, Resistance Breakout and Support Breakdown. Pattern detection remains single-timeframe and pattern-only.

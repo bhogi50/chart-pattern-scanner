@@ -90,37 +90,74 @@ def indicators(df,direction):
 def score(m,s,w=.35): return round(100*(w*m/len(m)+(1-w)*s/len(s)),1)
 def row(setup,d,m,s):
     return dict(Setup=setup,Direction=d,Eligible=all(x[1] for x in m),Mandatory=f"{sum(x[1] for x in m)}/{len(m)}",Supporting=f"{sum(x[1] for x in s)}/{len(s)}",Confidence=score(m,s),Checklist="; ".join(n+(" ✓" if ok else " ✗") for n,ok in m+s))
-def scan_setups(df,wave):
-    pats,g,H,L=geometry(df); out=[]; td=trend(df); wt=trend(wave)
-    for d in ("Bullish","Bearish"):
-        I=indicators(df,d); bp=any(x[1]==d for x in pats)
-        if d=="Bullish":
-            m=[("Tide bullish",td>=55),("Wave retracement",wt<td),("Bullish pattern",bp),("Bullish candle",I["candle"])]
-            s=[("Lower BB",I["bb"]=="Lower"),("EMA positive",I["ema"]),("RSI >40",I["rsi"]>40),("Stochastic PCO",I["pco"]),("Volume >avg",not np.isnan(I["vol"]) and I["vol"]>1)]
-        else:
-            m=[("Tide bearish",td<=45),("Wave retracement",wt>td),("Bearish pattern",bp),("Bearish candle",I["candle"])]
-            s=[("Upper BB",I["bb"]=="Upper"),("EMA negative",I["ema"]),("RSI <60",I["rsi"]<60),("Stochastic NCO",I["nco"]),("Volume >avg",not np.isnan(I["vol"]) and I["vol"]>1)]
-        out.append(row("ASTA Triple Screen",d,m,s))
-    for d in ("Bullish","Bearish"):
-        I=indicators(df,d)
-        ispat=any(x[1]==d and ("Double" in x[0]) for x in pats)
-        if d=="Bullish":
-            m=[("Double Bottom/Fake Breakdown",ispat),("Bullish reversal candle",I["candle"])]
-            s=[("Lower BB",I["bb"]=="Lower"),("High confirmation volume",not np.isnan(I["vol"]) and I["vol"]>1.5),("TI uptick proxy",td>=50),("RSI >40",I["rsi"]>40),("Stochastic PCO",I["pco"]),("DI PCO/converging",I["dipco"] or abs(I["pi"]-I["mi"])<5)]
-        else:
-            m=[("Double Top/Fake Breakout",ispat),("Bearish reversal candle",I["candle"])]
-            s=[("Upper BB",I["bb"]=="Upper"),("High confirmation volume",not np.isnan(I["vol"]) and I["vol"]>1.5),("TI downtick proxy",td<=50),("RSI <60",I["rsi"]<60),("Stochastic NCO",I["nco"]),("DI NCO/converging",I["dinco"] or abs(I["pi"]-I["mi"])<5)]
-        out.append(row("ASTA Swing Trader",d,m,s))
-    for d in ("Bullish","Bearish"):
-        I=indicators(df,d); bull=d=="Bullish"; td=trend(df)
-        # TLBO/TLBD is represented by a transparent pivot-break proxy.
-        if bull:
-            H,_=piv(df); br=bool(H and df.Close.iloc[-1]>df.High.iloc[H[-1]])
-            m=[("BB upper-half challenge",I["bb"] in ("Upper","Inside")),("Tide bullish",td>=55),("RSI >40 (momentum)",I["rsi"]>40),("TLBO proxy",br),("Above-average volume",not np.isnan(I["vol"]) and I["vol"]>1),("EMA positive",I["ema"]),("DI PCO",I["dipco"]),("ADX >15",I["adx"]>15)]
-            s=[("P >50 EMA",df.Close.iloc[-1]>ema(df.Close,50).iloc[-1]),("No immediate resistance proxy",True)]
-        else:
-            _,L=piv(df); br=bool(L and df.Close.iloc[-1]<df.Low.iloc[L[-1]])
-            m=[("BB lower-half challenge",I["bb"] in ("Lower","Inside")),("Tide bearish",td<=45),("RSI <60 (momentum)",I["rsi"]<60),("TLBD proxy",br),("Above-average volume",not np.isnan(I["vol"]) and I["vol"]>1),("EMA negative",I["ema"]),("DI NCO",I["dinco"]),("ADX >15",I["adx"]>15)]
-            s=[("P <50 EMA",df.Close.iloc[-1]<ema(df.Close,50).iloc[-1]),("No immediate support proxy",True)]
-        out.append(row("ASTA Momentum Trader",d,m,s))
+
+def _safe_slope(vals, idxs):
+    if len(idxs)<2:return 0.0
+    return float(__import__('numpy').polyfit(__import__('numpy').asarray(idxs,float),__import__('numpy').asarray(vals,float),1)[0])
+def _near(a,b,tol): return abs(a-b)/max(abs(a),abs(b),1e-9)<=tol
+def _advanced_patterns(df,H,L):
+    out=[]; n=len(df); c=df.Close.to_numpy(float); h=df.High.to_numpy(float); lo=df.Low.to_numpy(float)
+    if len(H)>=3:
+        a,b,d=H[-3:]
+        if a<b<d and h[b]>h[a] and h[b]>h[d] and _near(h[a],h[d],.08):
+            v1=lo[a:b+1].min(); v2=lo[b:d+1].min(); nl=(v1+v2)/2
+            if h[b]>nl*1.03: out.append(('Head and Shoulders','Bearish'))
+    if len(L)>=3:
+        a,b,d=L[-3:]
+        if a<b<d and lo[b]<lo[a] and lo[b]<lo[d] and _near(lo[a],lo[d],.08):
+            p1=h[a:b+1].max(); p2=h[b:d+1].max(); nl=(p1+p2)/2
+            if lo[b]<nl*.97: out.append(('Inverse Head and Shoulders','Bullish'))
+    if len(H)>=2 and len(L)>=2:
+        hh=h[H[-5:]]; ll=lo[L[-5:]]; top=float(__import__('numpy').median(hh)); bot=float(__import__('numpy').median(ll))
+        if max(abs(hh-top))/top<.035 and max(abs(ll-bot))/bot<.035 and .03<(top-bot)/((top+bot)/2)<.30: out.append(('Rectangle','Neutral'))
+    if n>=45:
+        w=c[-45:]; left=int(__import__('numpy').argmax(w[:18])); bottom=int(__import__('numpy').argmin(w[12:34]))+12; right=int(__import__('numpy').argmax(w[bottom+4:40]))+bottom+4
+        if 5<=left<bottom<right<=40:
+            rim=(w[left]+w[right])/2
+            if (rim-w[bottom])/rim>.08 and _near(w[left],w[right],.10) and len(w[right+1:])>=3 and (rim-w[right+1:].min())/rim<.10: out.append(('Cup and Handle','Bullish'))
+    if n>=25:
+        pre=c[-25:-10]; ch=h[-10:]; cl=lo[-10:]; impulse=pre[-1]/pre[0]-1; mh=_safe_slope(ch,range(10)); ml=_safe_slope(cl,range(10)); span0=ch[0]-cl[0]; span1=ch[-1]-cl[-1]
+        if abs(impulse)>.10 and span1<span0*.75 and mh<0 and ml>0: out.append(('Bullish Pennant' if impulse>0 else 'Bearish Pennant', 'Bullish' if impulse>0 else 'Bearish'))
+    if len(H)>=2 and len(L)>=2:
+        res=max(h[H[-4:]]); sup=min(lo[L[-4:]]); ar=(h[-20:]-lo[-20:]).mean()
+        if c[-1]>res+.15*ar: out.append(('Resistance Breakout','Bullish'))
+        elif c[-1]<sup-.15*ar: out.append(('Support Breakdown','Bearish'))
     return out
+_old_geometry=geometry
+def geometry(df):
+    found,g,H,L=_old_geometry(df); seen=set(found)
+    for p in _advanced_patterns(df,H,L):
+        if p not in seen: found.append(p); seen.add(p)
+    return found,g,H,L
+
+
+def pattern_target(df, pattern, direction, H=None, L=None):
+    import numpy as np
+    c=float(df.Close.iloc[-1]); h=df.High.to_numpy(float); lo=df.Low.to_numpy(float)
+    if H is None or L is None: _,_,H,L=geometry(df)
+    entry=c; stop=None; t1=None; t2=None; method='Measured move'
+    if pattern in ('Double Bottom','Double Top') and len(H)>=2 and len(L)>=2:
+        if pattern=='Double Bottom':
+            neck=float(max(h[H[-2]],h[H[-1]])); base=float(min(lo[L[-2]],lo[L[-1]])); height=neck-base
+            entry=neck; t1=neck+height; t2=neck+1.618*height; stop=base; method='Neckline + pattern height'
+        else:
+            neck=float(min(lo[L[-2]],lo[L[-1]])); top=float(max(h[H[-2]],h[H[-1]])); height=top-neck
+            entry=neck; t1=neck-height; t2=neck-1.618*height; stop=top; method='Neckline - pattern height'
+    elif pattern in ('Head and Shoulders','Inverse Head and Shoulders') and len(H)>=3 and len(L)>=3:
+        if pattern=='Head and Shoulders':
+            head=float(h[H[-2]]); neck=(float(min(lo[H[-3]:H[-2]+1]))+float(min(lo[H[-2]:H[-1]+1])))/2; height=head-neck
+            entry=neck; t1=neck-height; t2=neck-1.618*height; stop=head; method='Head-to-neckline projection'
+        else:
+            head=float(lo[L[-2]]); neck=(float(max(h[L[-3]:L[-2]+1]))+float(max(h[L[-2]:L[-1]+1])))/2; height=neck-head
+            entry=neck; t1=neck+height; t2=neck+1.618*height; stop=head; method='Head-to-neckline projection'
+    elif len(H)>=2 and len(L)>=2:
+        resistance=float(max(h[H[-4:]])); support=float(min(lo[L[-4:]])); height=max(resistance-support,0)
+        if direction=='Bullish': entry=resistance; t1=resistance+height; t2=resistance+1.618*height; stop=support
+        elif direction=='Bearish': entry=support; t1=support-height; t2=support-1.618*height; stop=resistance
+        method='Pattern range projection'
+    if t1 is None:
+        rng=float(np.max(h[-20:])-np.min(lo[-20:]))
+        if direction=='Bullish': t1=c+rng; t2=c+1.618*rng; stop=float(np.min(lo[-10:]))
+        elif direction=='Bearish': t1=c-rng; t2=c-1.618*rng; stop=float(np.max(h[-10:]))
+        method='Recent-range fallback'
+    return dict(current=c,entry=entry,stop=stop,target1=t1,target2=t2,method=method)

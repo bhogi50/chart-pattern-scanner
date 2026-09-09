@@ -1,173 +1,214 @@
 
-import io,requests
+import io, requests
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from detector import scan_setups
+from detector import geometry, pattern_target
 
-st.set_page_config(page_title="ASTA Tide-Wave Scanner",page_icon="📈",layout="wide")
-URLS={
-"NIFTY 50":"https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv",
-"NIFTY Next 50":"https://www.niftyindices.com/IndexConstituent/ind_niftynext50list.csv",
-"NIFTY Midcap 150":"https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
-"NIFTY Smallcap 250":"https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv"}
-REL={"Daily":("1d","4h","1y","60d"),"Weekly":("1wk","1d","5y","2y"),"Monthly":("1mo","1wk","10y","5y")}
+st.set_page_config(page_title="Chart Pattern Scanner", page_icon="📈", layout="wide")
+
+URLS = {
+    "NIFTY 50": "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv",
+    "NIFTY Next 50": "https://www.niftyindices.com/IndexConstituent/ind_niftynext50list.csv",
+    "NIFTY Midcap 150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
+    "NIFTY Smallcap 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
+}
+
+# Pattern detection timeframe is now explicit.
+# We do NOT mix Tide/Wave/ASTA conditions.
+TF = {
+    "Daily": ("1d", "2y"),
+    "Weekly": ("1wk", "7y"),
+    "Monthly": ("1mo", "15y"),
+}
 
 @st.cache_data(ttl=86400)
 def symbols(name):
-    r=requests.get(URLS[name],headers={"User-Agent":"Mozilla/5.0"},timeout=15); r.raise_for_status()
-    x=pd.read_csv(io.BytesIO(r.content)); c=next(c for c in x.columns if c.upper()=="SYMBOL")
-    return x[c].dropna().astype(str).str.strip().tolist()
+    r = requests.get(URLS[name], headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    r.raise_for_status()
+    x = pd.read_csv(io.BytesIO(r.content))
+    col = next(c for c in x.columns if c.upper() == "SYMBOL")
+    return x[col].dropna().astype(str).str.strip().tolist()
 
 @st.cache_data(ttl=900)
-def data(sym,period,interval):
+def data(sym, period, interval):
     import yfinance as yf
-    x=yf.download(sym,period=period,interval=interval,auto_adjust=False,progress=False)
-    if isinstance(x.columns,pd.MultiIndex): x.columns=x.columns.get_level_values(0)
+    x = yf.download(sym, period=period, interval=interval,
+                     auto_adjust=False, progress=False)
+    if isinstance(x.columns, pd.MultiIndex):
+        x.columns = x.columns.get_level_values(0)
     return x.dropna()
 
-st.title("📈 ASTA Tide → Wave → Setup Scanner")
-st.caption("Based on the three ASTA checklists in GEO PAN - SETUPS.pdf")
+st.title("📈 Chart Pattern Scanner")
+st.caption("Pure price-action pattern detection — no ASTA setup scoring")
 
 with st.sidebar:
     st.header("Scanner")
-    universe=st.selectbox("Universe",list(URLS))
-    tide=st.selectbox("Candle / Tide",["Daily","Weekly","Monthly"])
-    view=st.radio("View",["All","Bullish","Bearish"])
-    setups=st.multiselect("Setup",["ASTA Triple Screen","ASTA Swing Trader","ASTA Momentum Trader"],default=["ASTA Triple Screen","ASTA Swing Trader","ASTA Momentum Trader"])
-    minimum=st.slider("Minimum confidence",0,100,0,5)
-    scan=st.button("🔎 SCAN",type="primary",use_container_width=True)
-    st.divider(); st.markdown("**Tide → Wave**")
-    st.write("Daily → 4H"); st.write("Weekly → Daily"); st.write("Monthly → Weekly")
+    universe = st.selectbox("Universe", list(URLS))
+    timeframe = st.selectbox("Pattern timeframe", ["Daily", "Weekly", "Monthly"])
+    view = st.radio("View", ["All", "Bullish", "Bearish", "Neutral"])
+    patterns = st.multiselect(
+        "Patterns",
+        [
+            "Symmetrical Triangle", "Ascending Triangle", "Descending Triangle",
+            "Rising Wedge", "Falling Wedge", "Rising Channel", "Falling Channel",
+            "Double Bottom", "Double Top", "Bullish Flag", "Bearish Flag",
+            "Head and Shoulders", "Inverse Head and Shoulders", "Rectangle",
+            "Cup and Handle", "Bullish Pennant", "Bearish Pennant",
+            "Resistance Breakout", "Support Breakdown"
+        ],
+        default=[
+            "Symmetrical Triangle", "Ascending Triangle", "Descending Triangle",
+            "Rising Wedge", "Falling Wedge", "Rising Channel", "Falling Channel",
+            "Double Bottom", "Double Top", "Bullish Flag", "Bearish Flag",
+            "Head and Shoulders", "Inverse Head and Shoulders", "Rectangle",
+            "Cup and Handle", "Bullish Pennant", "Bearish Pennant",
+            "Resistance Breakout", "Support Breakdown"
+        ]
+    )
+    scan = st.button("🔎 SCAN PATTERNS", type="primary", use_container_width=True)
+    st.divider()
+    st.markdown("**How timeframe works**")
+    st.write("Daily = patterns from daily candles")
+    st.write("Weekly = patterns from weekly candles")
+    st.write("Monthly = patterns from monthly candles")
+    st.caption("No 4H/1D wave confirmation is used in this pattern-only version.")
 
 if scan:
-    try: syms=symbols(universe)
-    except Exception as e: st.error(f"Could not load {universe} constituents: {e}"); st.stop()
-    ti,wi,tp,wp=REL[tide]; rows=[]; bar=st.progress(0)
-    for i,s in enumerate(syms,1):
+    try:
+        syms = symbols(universe)
+    except Exception as e:
+        st.error(f"Could not load {universe} constituents: {e}")
+        st.stop()
+
+    interval, period = TF[timeframe]
+    rows = []
+    bar = st.progress(0)
+
+    for i, s in enumerate(syms, 1):
         try:
-            td=data(s+".NS",tp,ti); wd=data(s+".NS",wp,wi)
-            if len(td)>=60 and len(wd)>=40:
-                for p in scan_setups(td,wd):
-                    if p["Setup"] in setups and (view=="All" or p["Direction"]==view) and p["Confidence"]>=minimum:
-                        rows.append({"Stock":s,"Tide":tide,**p})
-        except Exception: pass
-        bar.progress(i/len(syms))
-    st.session_state.results=pd.DataFrame(rows); st.session_state.filter=(universe,tide,view)
+            df = data(s + ".NS", period, interval)
+            if len(df) < 60:
+                continue
+
+            found, geometry_score, H, L = geometry(df)
+
+            for name, direction in found:
+                if name not in patterns:
+                    continue
+                if view != "All" and direction != view:
+                    continue
+
+                rows.append({
+                    "Stock": s,
+                    "Timeframe": timeframe,
+                    "Pattern": name,
+                    "Direction": direction,
+                    "Pattern Strength": round(float(geometry_score), 1),
+                    "Detected On": df.index[-1].strftime("%Y-%m-%d"),
+                })
+        except Exception:
+            pass
+        bar.progress(i / len(syms))
+
+    st.session_state.results = pd.DataFrame(rows)
+    st.session_state.scan_filter = (universe, timeframe, view)
 
 if "results" not in st.session_state:
-    st.info("Select Universe + Tide + Direction, then press SCAN."); st.stop()
-r=st.session_state.results
-if r.empty: st.warning("No qualifying ASTA setups found."); st.stop()
-r=r.sort_values(["Confidence","Stock"],ascending=[False,True])
-a,b,c,d=st.columns(4); a.metric("Universe",st.session_state.filter[0]); b.metric("Stocks",r.Stock.nunique()); c.metric("Setups",len(r)); d.metric("≥80",int((r.Confidence>=80).sum()))
-st.subheader("Scan results")
-st.dataframe(r[["Stock","Tide","Setup","Direction","Eligible","Mandatory","Supporting","Confidence","Checklist"]],use_container_width=True,hide_index=True)
-st.download_button("⬇️ Download CSV",r.to_csv(index=False),"asta_scan.csv","text/csv")
-st.divider()
-sel=st.selectbox("Stock chart",sorted(r.Stock.unique()))
-ti,wi,tp,wp=REL[st.session_state.filter[1]]; ch=data(sel+".NS",tp,ti)
-# ---------- ASTA annotated chart ----------
-from detector import geometry, indicators, trend, ema
+    st.info("Select a universe and pattern timeframe, then press SCAN PATTERNS.")
+    st.stop()
 
-fig = go.Figure()
-fig.add_trace(go.Candlestick(
-    x=ch.index, open=ch.Open, high=ch.High, low=ch.Low, close=ch.Close,
-    name="Candles"
-))
+r = st.session_state.results
+if r.empty:
+    st.warning("No selected chart patterns found.")
+    st.stop()
 
-pats, geom_score, H, L = geometry(ch)
-latest = ch.Close.iloc[-1]
+r = r.sort_values(["Pattern Strength", "Stock"], ascending=[False, True])
 
-# Draw pivot points.
-if H:
-    fig.add_trace(go.Scatter(
-        x=ch.index[H], y=ch.High.iloc[H], mode="markers",
-        marker=dict(symbol="triangle-down", size=9),
-        name="Swing High"
-    ))
-if L:
-    fig.add_trace(go.Scatter(
-        x=ch.index[L], y=ch.Low.iloc[L], mode="markers",
-        marker=dict(symbol="triangle-up", size=9),
-        name="Swing Low"
-    ))
+a, b, c, d = st.columns(4)
+a.metric("Universe", st.session_state.scan_filter[0])
+b.metric("Timeframe", st.session_state.scan_filter[1])
+c.metric("Stocks", r.Stock.nunique())
+d.metric("Patterns", len(r))
 
-# Draw the most recent chart-pattern geometry.
-if len(H) >= 2 and len(L) >= 2:
-    hidx = H[-5:] if len(H) >= 5 else H
-    lidx = L[-5:] if len(L) >= 5 else L
-    import numpy as np
-    mh, bh = np.polyfit(hidx, ch.High.iloc[hidx].to_numpy(float), 1)
-    ml, bl = np.polyfit(lidx, ch.Low.iloc[lidx].to_numpy(float), 1)
-    start_i = max(0, min(hidx[0], lidx[0]) - 5)
-    end_i = len(ch) - 1
-    xline = np.array([start_i, end_i])
-    highline = mh*xline + bh
-    lowline = ml*xline + bl
-
-    # Only show the lines when the detector found a geometrical pattern.
-    if pats:
-        fig.add_trace(go.Scatter(
-            x=ch.index[xline], y=highline, mode="lines",
-            line=dict(dash="dash", width=2), name="Pattern resistance"
-        ))
-        fig.add_trace(go.Scatter(
-            x=ch.index[xline], y=lowline, mode="lines",
-            line=dict(dash="dash", width=2), name="Pattern support"
-        ))
-
-# Add the selected setup's reference levels.
-selected_rows = r[r.Stock == sel]
-if not selected_rows.empty:
-    best = selected_rows.iloc[0]
-    direction = best["Direction"]
-    entry = float(latest)
-    if direction == "Bullish":
-        stop = float(ch.Low.iloc[-1])
-        target = float(ch.High.iloc[-1])
-    else:
-        stop = float(ch.High.iloc[-1])
-        target = float(ch.Low.iloc[-1])
-
-    fig.add_hline(y=entry, line_dash="dot", annotation_text="Entry / current price",
-                  annotation_position="top left")
-    fig.add_hline(y=stop, line_dash="dash", annotation_text="Stop reference",
-                  annotation_position="bottom left")
-    fig.add_hline(y=target, line_dash="dash", annotation_text="Target reference",
-                  annotation_position="top right")
-
-    # Highlight the current setup in the title.
-    title = (
-        f"{sel} — {st.session_state.filter[1]} Tide | "
-        f"{best['Setup']} • {direction} • Confidence {best['Confidence']}/100"
-    )
-else:
-    title = f"{sel} — {st.session_state.filter[1]} Tide"
-
-fig.update_layout(
-    title=title,
-    height=680,
-    xaxis_rangeslider_visible=False,
-    hovermode="x unified",
-    legend=dict(orientation="h", y=1.02, x=0)
+st.subheader("Detected chart patterns")
+st.dataframe(
+    r[["Stock", "Timeframe", "Pattern", "Direction", "Pattern Strength", "Detected On"]],
+    use_container_width=True,
+    hide_index=True
 )
-st.plotly_chart(fig, use_container_width=True)
+st.download_button(
+    "⬇️ Download CSV", r.to_csv(index=False),
+    "chart_pattern_scan.csv", "text/csv"
+)
 
-# Pattern explanation directly below the chart.
-pattern_names = ", ".join(f"{p[0]} ({p[1]})" for p in pats) if pats else "No qualifying geometric pattern detected"
-st.caption(f"Detected geometry: {pattern_names}. Geometry score: {geom_score:.1f}/100.")
-st.subheader("Confidence & checklist")
+st.divider()
+st.subheader("Stocks")
+st.caption("Charts are hidden from the scan page. Click View to open the stock details.")
+if "selected_stock" not in st.session_state: st.session_state.selected_stock=None
+if "selected_pattern" not in st.session_state: st.session_state.selected_pattern=None
+
+for i,row in r.reset_index(drop=True).iterrows():
+    c1,c2,c3,c4,c5,c6=st.columns([1.4,1.0,2.5,1.0,1.1,.7])
+    c1.write(f"**{row.Stock}**"); c2.write(row.Timeframe); c3.write(row.Pattern); c4.write(row.Direction); c5.write(f"{row['Pattern Strength']:.1f}")
+    if c6.button("View",key=f"view_{i}_{row.Stock}_{row.Pattern}"):
+        st.session_state.selected_stock=row.Stock; st.session_state.selected_pattern=row.Pattern; st.rerun()
+
+if st.session_state.selected_stock:
+    sel=st.session_state.selected_stock
+    sr=r[r.Stock==sel].reset_index(drop=True)
+    opts=sr.Pattern.tolist()
+    if st.session_state.selected_pattern not in opts: st.session_state.selected_pattern=opts[0]
+    pat=st.selectbox("Detected pattern",opts,index=opts.index(st.session_state.selected_pattern))
+    st.session_state.selected_pattern=pat
+    selected=sr[sr.Pattern==pat].iloc[0]
+    interval,period=TF[selected.Timeframe]; ch=data(sel+'.NS',period,interval)
+    found,geometry_score,H,L=geometry(ch); details=pattern_target(ch,pat,selected.Direction,H,L)
+    st.divider(); st.subheader(f"{sel} — {pat}")
+    st.caption(f"{selected.Timeframe} candles · {selected.Direction} · strength {selected['Pattern Strength']:.1f}/100")
+    a,b,c,d,e=st.columns(5)
+    a.metric("Current",f"₹{details['current']:,.2f}"); b.metric("Entry / Breakout",f"₹{details['entry']:,.2f}")
+    c.metric("Stop / Invalidation",f"₹{details['stop']:,.2f}" if details['stop'] is not None else '—')
+    d.metric("Target 1",f"₹{details['target1']:,.2f}" if details['target1'] is not None else '—')
+    e.metric("Target 2",f"₹{details['target2']:,.2f}" if details['target2'] is not None else '—')
+    if details['stop'] is not None:
+        risk=abs(details['entry']-details['stop']); reward=abs(details['target1']-details['entry']); rr=reward/risk if risk else None
+        st.info(f"Target method: **{details['method']}**"+(f" · Risk/Reward to T1: **1:{rr:.2f}**" if rr else ''))
+    else: st.info(f"Target method: **{details['method']}**")
+    import numpy as np
+    fig=go.Figure(go.Candlestick(x=ch.index,open=ch.Open,high=ch.High,low=ch.Low,close=ch.Close,name='Candles'))
+    if H: fig.add_trace(go.Scatter(x=ch.index[H],y=ch.High.iloc[H],mode='markers',marker=dict(symbol='triangle-down',size=8),name='Swing High'))
+    if L: fig.add_trace(go.Scatter(x=ch.index[L],y=ch.Low.iloc[L],mode='markers',marker=dict(symbol='triangle-up',size=8),name='Swing Low'))
+    if len(H)>=2 and len(L)>=2:
+        hi=H[-5:]; lo=L[-5:]; mh,bh=np.polyfit(hi,ch.High.iloc[hi].to_numpy(float),1); ml,bl=np.polyfit(lo,ch.Low.iloc[lo].to_numpy(float),1); xx=np.array([max(0,min(hi[0],lo[0])-5),len(ch)-1])
+        fig.add_trace(go.Scatter(x=ch.index[xx],y=mh*xx+bh,mode='lines',line=dict(dash='dash',width=2),name='Resistance'))
+        fig.add_trace(go.Scatter(x=ch.index[xx],y=ml*xx+bl,mode='lines',line=dict(dash='dash',width=2),name='Support'))
+    for y,label,dash in [(details['entry'],'Entry / breakout','dot'),(details['target1'],'Target 1','dash'),(details['target2'],'Target 2','dash'),(details['stop'],'Stop / invalidation','dash')]:
+        if y is not None: fig.add_hline(y=y,line_dash=dash,annotation_text=label,annotation_position='top left')
+    fig.update_layout(title=f"{sel} — {pat} | {selected.Direction}",height=680,xaxis_rangeslider_visible=False,hovermode='x unified')
+    st.plotly_chart(fig,use_container_width=True)
+    if st.button('← Back to scan results'):
+        st.session_state.selected_stock=None; st.session_state.selected_pattern=None; st.rerun()
+
+st.subheader("What the detector is doing")
 st.markdown("""
-**Confidence is setup quality, not probability of profit.**
+**1. Select the candle timeframe.** The scanner detects patterns only on that
+timeframe; there is no ASTA Tide/Wave/Setup layer.
 
-Triple Screen = 35% mandatory structure + 65% supporting checks.
-Swing Trader = 45% mandatory structure + 55% supporting checks.
-Momentum Trader = 70% mandatory structure + 30% supporting checks.
+**2. Find swing highs and swing lows.** These pivots form the structural points
+used to construct pattern boundaries.
 
-The PDF's exact formulas for proprietary/undefined terms such as **TI, TLBO/TLBD,
-ATM PE/CE-TMJ and TMJ** are not specified on the three pages. The implementation
-therefore uses clearly labelled technical proxies where practical and does not
-fabricate derivatives/OI data.
+**3. Fit structural trendlines.** Recent swing highs form the resistance side;
+recent swing lows form the support side.
+
+**4. Classify geometry.** The slope and convergence/divergence of those lines
+are used to identify triangles, wedges and channels.
+
+**5. Detect repeated extrema.** Double Top/Bottom requires at least 8 candles
+between the two swing points and a price difference within 3%.
+
+**6. Detect flags.** A strong prior move followed by a relatively tight
+consolidation is classified as a bullish or bearish flag.
+
+**Pattern Strength is geometry quality, not probability of success.**
 """)
-st.info("The constituent lists are loaded from Nifty Indices CSV endpoints. Yahoo Finance supplies OHLCV. Daily → 4H is subject to Yahoo intraday history limits; use a dedicated NSE intraday provider before relying on it for research/live decisions.")
