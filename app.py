@@ -4,7 +4,6 @@ import html
 import requests
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from tradingpatterns.tradingpatterns import (
     detect_head_shoulder,
     detect_double_top_bottom,
@@ -91,94 +90,80 @@ def patternpy(df):
 
 
 def latest_patternpy_results(x, direction="All"):
-    """Return only the most recent PatternPy detection(s) on the latest detection bar."""
+    """Return only PatternPy labels from the most recent detection bar."""
     detections = []
     for col in PATTERN_COLUMNS:
         if col not in x.columns:
             continue
-        s = x[col].dropna()
-        for idx, value in s.items():
-            value = str(value)
+        series = x[col].dropna()
+        for idx, value in series.items():
+            value = str(value).strip()
             if value in BIAS and (direction == "All" or BIAS[value] == direction):
                 detections.append((idx, value))
-
     if not detections:
         return []
-
     latest_idx = max(idx for idx, _ in detections)
-    latest = []
-    for idx, value in detections:
-        if idx == latest_idx and value not in latest:
-            latest.append(value)
-    return latest
+    return list(dict.fromkeys(value for idx, value in detections if idx == latest_idx))
 
 
-def lightweight_chart(df, detections, symbol, tf):
-    """Render TradingView Lightweight Charts with the same OHLC data used by PatternPy."""
+def pattern_detection_dates(x, patterns):
+    """Return the PatternPy detection timestamp for each displayed label."""
+    result = {}
+    for col in PATTERN_COLUMNS:
+        if col not in x.columns:
+            continue
+        for idx, value in x[col].dropna().items():
+            value = str(value).strip()
+            if value in patterns:
+                result[value] = pd.Timestamp(idx)
+    return result
+
+
+def lightweight_chart(df, patterns, detection_dates):
+    """Render TradingView Lightweight Charts using the same OHLC data fed to PatternPy."""
     candles = []
     for idx, row in df.iterrows():
-        try:
-            candles.append({
-                "time": int(pd.Timestamp(idx).timestamp()),
-                "open": float(row["Open"]),
-                "high": float(row["High"]),
-                "low": float(row["Low"]),
-                "close": float(row["Close"]),
-            })
-        except Exception:
-            continue
-
+        ts = pd.Timestamp(idx)
+        candles.append({
+            "time": int(ts.timestamp()),
+            "open": float(row["Open"]), "high": float(row["High"]),
+            "low": float(row["Low"]), "close": float(row["Close"]),
+        })
     markers = []
-    for idx, pattern in detections:
-        try:
+    by_time = {int(pd.Timestamp(idx).timestamp()): (idx, row) for idx, row in df.iterrows()}
+    for pattern, dt in detection_dates.items():
+        t = int(pd.Timestamp(dt).timestamp())
+        if t in by_time:
+            row = by_time[t][1]
+            bullish = BIAS.get(pattern) == "Bullish"
             markers.append({
-                "time": int(pd.Timestamp(idx).timestamp()),
-                "position": "belowBar" if BIAS.get(pattern) == "Bullish" else "aboveBar",
-                "color": "#26a69a" if BIAS.get(pattern) == "Bullish" else "#ef5350",
-                "shape": "arrowUp" if BIAS.get(pattern) == "Bullish" else "arrowDown",
-                "text": pattern,
+                "time": t,
+                "position": "belowBar" if bullish else "aboveBar",
+                "shape": "arrowUp" if bullish else "arrowDown",
+                "text": pattern.replace(" and ", " & "),
             })
-        except Exception:
-            continue
-
-    payload = json.dumps({
-        "candles": candles,
-        "markers": markers,
-        "symbol": symbol,
-        "timeframe": tf,
-        "patterns": [p for _, p in detections],
-    }, separators=(",", ":"))
-
-    chart_html = """<!doctype html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+    payload = json.dumps({"candles": candles, "markers": markers}, separators=(",", ":"))
+    html_doc = f"""
+<!doctype html><html><head><meta charset="utf-8">
 <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-<style>
-html,body{margin:0;padding:0;background:#0f131a;color:#d7dce5;font-family:Arial,sans-serif;overflow:hidden}
-#wrap{height:680px;width:100%;position:relative}#chart{height:640px;width:100%}
-#legend{height:40px;display:flex;align-items:center;padding:0 12px;box-sizing:border-box;border-top:1px solid #242a34;font-size:13px;gap:18px;white-space:nowrap;overflow:hidden}
-</style></head><body>
-<div id="wrap"><div id="chart"></div><div id="legend"></div></div>
-<script>
-const D=__DATA__;
-const chart=LightweightCharts.createChart(document.getElementById('chart'),{
- autoSize:true,
- layout:{background:{type:'solid',color:'#0f131a'},textColor:'#c9d1d9'},
- grid:{vertLines:{color:'#1d232d'},horzLines:{color:'#1d232d'}},
- crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
- rightPriceScale:{borderColor:'#303744'},
- timeScale:{borderColor:'#303744',timeVisible:true,secondsVisible:false},
- localization:{priceFormatter:p=>p.toFixed(2)}
-});
-const series=chart.addSeries(LightweightCharts.CandlestickSeries,{upColor:'#26a69a',downColor:'#ef5350',borderUpColor:'#26a69a',borderDownColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350'});
+<style>html,body{{margin:0;background:#0f131a}}#chart{{height:680px;width:100%}}</style></head>
+<body><div id="chart"></div><script>
+const D={payload};
+const chart=LightweightCharts.createChart(document.getElementById('chart'),{{
+  autoSize:true, layout:{{background:{{type:'solid',color:'#0f131a'}},textColor:'#c9d1d9'}},
+  grid:{{vertLines:{{color:'#202631'}},horzLines:{{color:'#202631'}}}},
+  rightPriceScale:{{borderColor:'#303744'}}, timeScale:{{borderColor:'#303744',timeVisible:true,secondsVisible:false}},
+  crosshair:{{mode:LightweightCharts.CrosshairMode.Normal}}
+}});
+const series=chart.addSeries(LightweightCharts.CandlestickSeries,{{
+  upColor:'#26a69a',downColor:'#ef5350',borderUpColor:'#26a69a',borderDownColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350'
+}});
 series.setData(D.candles);
-if(D.markers.length) LightweightCharts.createSeriesMarkers(series,D.markers.sort((a,b)=>a.time-b.time));
+if(D.markers.length && LightweightCharts.createSeriesMarkers) LightweightCharts.createSeriesMarkers(series,D.markers);
 chart.timeScale().fitContent();
-document.getElementById('legend').innerHTML='<b>'+D.symbol+'</b> · '+D.timeframe+' · PatternPy: <b>'+D.patterns.join(', ')+'</b> · TradingView Lightweight Charts';
-</script></body></html>"""
-    chart_html = chart_html.replace("__DATA__", payload)
-    components.html(chart_html, height=685, scrolling=False)
+</script></body></html>
+"""
+    st.html(html_doc, height=700)
 
 
 st.title("📈 Chart Pattern Scanner")
@@ -193,7 +178,7 @@ with st.sidebar:
         index=CANDLE_OPTIONS[tf].index({"Daily": 100, "Weekly": 52, "Monthly": 36}[tf]),
     )
     direction = st.radio("Direction filter", ["All", "Bullish", "Bearish"])
-    scan = st.button("🔎 SCAN PATTERNS", type="primary", use_container_width=True)
+    scan = st.button("🔎 SCAN PATTERNS", type="primary", width="stretch")
     st.caption(f"PatternPy receives the latest {n} {tf.lower()} candles.")
 
 if scan:
@@ -241,15 +226,11 @@ if "results" in st.session_state:
 if st.session_state.get("selected"):
     s = st.session_state.selected
     st.divider()
-    st.subheader(f"{s} — TradingView Lightweight Chart")
+    st.subheader(f"{s} — Chart")
+    displayed = next((r["Pattern"] for r in st.session_state.results if r["Stock"] == s), "None")
+    st.caption(f"PatternPy detected: {displayed}")
     d = prices(s + ".NS", tf, n)
-    if d.empty:
-        st.error("Price data could not be loaded for this stock.")
-    else:
-        x = patternpy(d)
-        detected = latest_patternpy_results(x, direction="All")
-        if detected:
-            st.caption("PatternPy detected: " + ", ".join(p for _, p in detected))
-            lightweight_chart(d, detected, s, tf)
-        else:
-            st.info("No current PatternPy detection for this stock. Please scan again.")
+    x = patternpy(d)
+    pats = latest_patternpy_results(x, direction="All")
+    dates = pattern_detection_dates(x, pats)
+    lightweight_chart(d, pats, dates)
