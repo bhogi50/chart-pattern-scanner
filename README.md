@@ -1,21 +1,26 @@
 # Chart Pattern Scanner
 
-Free TradingView-style charting is implemented with TradingView Lightweight Charts.
-The library is loaded client-side; no paid TradingView charting product is used.
+Free Streamlit scanner for the selected NSE universes.
 
-## Chart rendering
-The stock detail chart renders:
-- Candlesticks
-- Crosshair
-- Zoom and pan
-- Swing high/low markers
-- Pattern-specific trendlines/boundaries
-- Entry / breakout level
-- Stop / invalidation level
-- Target 1
-- Target 2
-- Pattern name, direction and confidence
+## Patterns
+- Double Top
+- Double Bottom
+- Head and Shoulders
+- Inverse Head and Shoulders
+- Bullish Flag
+- Bearish Flag
+- Rising Channel
+- Falling Channel
 
-Pattern geometry is drawn from the actual swing points used by the detector rather than as a generic decorative overlay.
+## UI
+- NIFTY 50, NIFTY Next 50, NIFTY Midcap 150, NIFTY Smallcap 250
+- Daily / Weekly / Monthly candles with realistic candle-count presets
+- All / Bullish / Bearish filter
+- Optional minimum 1:2 R/R-to-Target-1 filter
+- One result row per stock; multiple patterns are comma-separated
+- Results sorted by best pattern confidence
+- View opens pattern details and a free Lightweight Charts candlestick chart
+- Major support/resistance, entry, CMP, targets, stop and R:R shown in details
 
-Lightweight Charts requires TradingView attribution on a public page.
+Run with:
+`streamlit run app.py`
