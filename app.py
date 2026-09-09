@@ -1,7 +1,7 @@
 
 import io, json, html, requests, pandas as pd, streamlit as st
 import streamlit.components.v1 as components
-from detector import geometry, pattern_target, pattern_confidence
+from detector import geometry, pattern_target, pattern_confidence, pattern_status
 
 st.set_page_config(page_title="Chart Pattern Scanner", page_icon="📈", layout="wide")
 
@@ -90,6 +90,14 @@ def render_lightweight_chart(df, pattern, direction, details, H, L, confidence):
         if ph and pl:
             geometry_lines.append({"type":"horizontal","points":ph[-4:],"label":"Resistance"})
             geometry_lines.append({"type":"horizontal","points":pl[-4:],"label":"Support"})
+    elif pattern.startswith("Elliott"):
+        seq=[]
+        for i in sorted(set(H[-6:]+L[-6:])):
+            if i < len(df):
+                kind="H" if i in H else "L"
+                seq.append({"time":int(pd.Timestamp(df.index[i]).timestamp()),"value":float(df["High" if kind=="H" else "Low"].iloc[i])})
+        if len(seq)>=2:
+            geometry_lines.append({"type":"zigzag","points":seq[-6:],"label":pattern})
     elif pattern in ("Bullish Flag","Bearish Flag","Bullish Pennant","Bearish Pennant","Cup and Handle"):
         if len(ph)>=2: geometry_lines.append({"type":"trend","points":ph[-3:],"label":"Pattern upper boundary"})
         if len(pl)>=2: geometry_lines.append({"type":"trend","points":pl[-3:],"label":"Pattern lower boundary"})
@@ -189,6 +197,14 @@ for(const g of D.geometry){
         const ls=series;
         ls.createPriceLine({price:avg,color:lineColors[colorIndex++%lineColors.length],
             lineWidth:2,lineStyle:LightweightCharts.LineStyle.Solid,axisLabelVisible:true,title:g.label});
+    } else if(g.type==='zigzag'){
+        if(!g.points || g.points.length<2) continue;
+        const ls=chart.addSeries(LightweightCharts.LineSeries,{
+            color:lineColors[colorIndex++%lineColors.length],lineWidth:2,
+            lineStyle:LightweightCharts.LineStyle.Solid,
+            lastValueVisible:false,priceLineVisible:false
+        });
+        ls.setData(g.points.map(p=>({time:p.time,value:p.value})));
     } else {
         const pts=regression(g.points);
         if(!pts) continue;
@@ -207,6 +223,14 @@ for(const p of D.highs.slice(-5)){
 }
 for(const p of D.lows.slice(-5)){
     markers.push({time:p.time,position:'belowBar',color:'#8ab4f8',shape:'circle',text:'L'});
+}
+if(D.geometry.some(g=>g.type==='zigzag')){
+    const g=D.geometry.find(g=>g.type==='zigzag');
+    g.points.forEach((p,i)=>markers.push({
+        time:p.time,
+        position:(i%2===0?'belowBar':'aboveBar'),
+        color:'#f5c542',shape:'circle',text:(i===0?'0':String(i))
+    }));
 }
 markers.sort((a,b)=>a.time-b.time);
 if(markers.length) LightweightCharts.createSeriesMarkers(series,markers);
@@ -246,8 +270,6 @@ if scan:
             selected=[(p,d) for p,d in found if view=="All" or d==view]
             if selected:
                 eligible=[]
-                pattern_scores=[]
-                rr_values=[]
                 for p,d in selected:
                     score=pattern_confidence(df,p,d,H,L)
                     details=pattern_target(df,p,d,H,L)
@@ -256,21 +278,20 @@ if scan:
                         risk=abs(float(details["entry"])-float(details["stop"]))
                         reward=abs(float(details["target1"])-float(details["entry"]))
                         rr=(reward/risk) if risk>0 else None
-                    pattern_scores.append(score)
-                    rr_values.append(rr)
                     if (not min_rr_filter) or (rr is not None and rr >= 2.0):
-                        eligible.append((p,d,score,rr))
+                        status=pattern_status(df,p,d,H,L)
+                        eligible.append({"pattern":p,"status":status,"bias":d,"confidence":score,"rr":rr})
 
                 if eligible:
-                    dirs=sorted(set(d for _,d,_,_ in eligible))
+                    dirs=sorted(set(x["bias"] for x in eligible))
                     rows.append({
-                        "Stock":sym,
-                        "Timeframe":timeframe,
-                        "Candles":len(df),
-                        "Patterns Detected":", ".join(p for p,_,_,_ in eligible),
-                        "Direction":", ".join(dirs),
-                        "Pattern Confidence":max(x[2] for x in eligible),
-                        "Best R/R to T1":max(x[3] for x in eligible if x[3] is not None) if any(x[3] is not None for x in eligible) else None
+                        "Stock":sym, "Timeframe":timeframe, "Candles":len(df),
+                        "Pattern":"\n".join(x["pattern"] for x in eligible),
+                        "Status":"\n".join(x["status"] for x in eligible),
+                        "Bias":"\n".join(x["bias"] for x in eligible),
+                        "Confidence":"\n".join(f'{x["confidence"]:.1f}%' for x in eligible),
+                        "Pattern Confidence":max(x["confidence"] for x in eligible),
+                        "Best R/R to T1":max((x["rr"] for x in eligible if x["rr"] is not None), default=None)
                     })
         except Exception:
             continue
@@ -298,7 +319,7 @@ if r.empty:
 st.subheader("Detected patterns")
 st.caption("One row per stock. With the 1:2 filter enabled, only stocks with at least one detected pattern offering R/R to Target 1 of 1:2 or better are shown.")
 
-show=r[["Stock","Timeframe","Candles","Patterns Detected","Direction","Pattern Confidence","Best R/R to T1"]].copy()
+show=r[["Stock","Timeframe","Candles","Pattern","Status","Bias","Confidence","Pattern Confidence","Best R/R to T1"]].copy()
 
 # Keep confidence numeric while sorting so the displayed table is truly
 # ordered from strongest pattern-quality score to weakest.
@@ -326,8 +347,10 @@ st.dataframe(
         "Stock": st.column_config.TextColumn("Stock", width="small"),
         "Timeframe": st.column_config.TextColumn("Timeframe", width="small"),
         "Candles": st.column_config.NumberColumn("Candles", width="small"),
-        "Patterns Detected": st.column_config.TextColumn("Patterns Detected", width="large"),
-        "Direction": st.column_config.TextColumn("Direction", width="medium"),
+        "Pattern": st.column_config.TextColumn("Pattern", width="large"),
+        "Status": st.column_config.TextColumn("Status", width="medium"),
+        "Bias": st.column_config.TextColumn("Bias", width="medium"),
+        "Confidence": st.column_config.TextColumn("Confidence", width="medium"),
         "Pattern Confidence": st.column_config.TextColumn("Best Pattern Confidence", width="medium"),
         "Best R/R to T1": st.column_config.TextColumn("Best R/R to T1", width="small"),
     },
@@ -346,7 +369,7 @@ if st.session_state.get("selected"):
         st.stop()
 
     found,strength,H,L=geometry(df)
-    available=[(p,d) for p,d in found if p in row["Patterns Detected"].split(", ")]
+    available=[(p,d) for p,d in found if p in str(row["Pattern"]).split("\n")]
     if not available:
         st.warning("The pattern is no longer detected on the latest data. Please scan again.")
         st.stop()
@@ -359,6 +382,7 @@ if st.session_state.get("selected"):
     pat=st.selectbox("Pattern to inspect",labels)
     direction=dict(available)[pat]
     confidence=pattern_confidence(df,pat,direction,H,L)
+    status=pattern_status(df,pat,direction,H,L)
     details=pattern_target(df,pat,direction,H,L)
     if details is None:
         st.error("Not enough data to calculate targets.")
@@ -381,6 +405,7 @@ if st.session_state.get("selected"):
     reward=abs(details["target1"]-details["entry"])
     rr=reward/risk if risk else None
     st.info(
+        f"Pattern: **{pat}** · Status: **{status}** · Bias: **{direction}** · "
         f"Pattern confidence: **{confidence:.1f}%** · "
         f"Target method: **{details['method']}**" +
         (f" · R/R to T1: **1:{rr:.2f}**" if rr else "")

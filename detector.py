@@ -103,6 +103,24 @@ def pattern_confidence(df, pattern, direction, H=None, L=None):
                 rim_similarity=_clamp(100-abs(left-right)/max(abs(left),1e-9)*1000)
                 quality=.45*_clamp(cup_depth*450)+.55*rim_similarity
 
+    if pattern.startswith("Elliott"):
+        seq=_pivot_sequence(df,H,L)
+        if "5-Wave Impulse" in pattern and len(seq)>=6:
+            v=[x[1] for x in seq[-6:]]; k=[x[2] for x in seq[-6:]]
+            if k in (["L","H","L","H","L","H"],["H","L","H","L","H","L"]):
+                legs=[abs(v[1]-v[0]),abs(v[3]-v[2]),abs(v[5]-v[4])]
+                retr=[abs(v[2]-v[1]),abs(v[4]-v[3])]
+                quality=.55*_clamp(min(legs)/max(max(legs),1e-9)*120)+.45*_clamp(100-max(retr[i]/max(legs[i],1e-9) for i in range(2))*70)
+        elif "Ending Diagonal" in pattern and len(seq)>=6:
+            v=[x[1] for x in seq[-6:]]
+            spans=[abs(v[1]-v[0]),abs(v[3]-v[2]),abs(v[5]-v[4])]
+            contraction=_clamp(100-abs(spans[1]/max(spans[0],1e-9)-0.75)*180-abs(spans[2]/max(spans[1],1e-9)-0.75)*180)
+            quality=contraction
+        elif "ABC Correction" in pattern and len(seq)>=4:
+            v=[x[1] for x in seq[-4:]]
+            a=abs(v[1]-v[0]); b=abs(v[2]-v[1]); cleg=abs(v[3]-v[2])
+            quality=.5*_clamp(100-b/max(a,1e-9)*100)+.5*_clamp(min(cleg/max(a,1e-9),1.5)/1.5*100)
+
     if pattern in ("Resistance Breakout","Support Breakdown"):
         recent_range=max(h[-20:])-min(l[-20:])
         distance=abs(c[-1]-(max(h[H[-4:]]) if H else c[-1]) if direction=="Bullish"
@@ -112,6 +130,86 @@ def pattern_confidence(df, pattern, direction, H=None, L=None):
     # A recent, well-defined structure gets more weight than a stale structure.
     score=0.50*base + 0.40*quality + 0.07*touch + 0.03*recency
     return round(_clamp(score),1)
+
+
+def _alternating_pivots(H, L):
+    """Return recent confirmed pivots as (index, price, kind), alternating H/L."""
+    pts=[(i,"H") for i in H]+[(i,"L") for i in L]
+    pts.sort(key=lambda x:x[0])
+    if not pts: return []
+    out=[]
+    for i,k in pts:
+        if out and out[-1][2]==k:
+            # Keep the more extreme pivot when two same-type pivots are adjacent.
+            old=out[-1]
+            if (k=="H" and i>old[0]) or (k=="L" and i>old[0]):
+                out[-1]=(i,None,k)
+        else:
+            out.append((i,None,k))
+    return out
+
+def _pivot_sequence(df,H,L):
+    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
+    pts=_alternating_pivots(H,L)
+    return [(i, float(h[i] if k=="H" else l[i]), k) for i,_,k in pts]
+
+def elliott_patterns(df,H,L):
+    """Heuristic Elliott structures from confirmed swing pivots.
+    This is a structural detector, not a full Elliott Wave count engine.
+    """
+    seq=_pivot_sequence(df,H,L)
+    found=[]
+    if len(seq)>=6:
+        p=seq[-6:]
+        idx=[x[0] for x in p]; v=[x[1] for x in p]; k=[x[2] for x in p]
+        if k==["L","H","L","H","L","H"]:
+            w1=v[1]-v[0]; w2=v[1]-v[2]; w3=v[3]-v[2]; w4=v[3]-v[4]; w5=v[5]-v[4]
+            if w1>0 and w2>0 and w3>0 and w4>0 and w5>0 and v[2]>v[0] and v[4]>v[2] and v[5]>v[3]:
+                # Basic impulse quality: wave 3 is not the shortest and retracements stay orderly.
+                if w3 >= min(w1,w5)*0.75 and w2 < w1 and w4 < w3:
+                    found.append(("Elliott 5-Wave Impulse","Bullish"))
+                # Ending diagonal: contracting legs with overlapping/converging structure.
+                if w3 < w1*1.05 and w5 < w3*1.05 and (w3/w1 < 1.05) and (w5/w3 < 1.05):
+                    found.append(("Elliott Ending Diagonal","Bullish"))
+        elif k==["H","L","H","L","H","L"]:
+            w1=v[0]-v[1]; w2=v[2]-v[1]; w3=v[2]-v[3]; w4=v[4]-v[3]; w5=v[4]-v[5]
+            if w1>0 and w2>0 and w3>0 and w4>0 and w5>0 and v[2]<v[0] and v[4]<v[2] and v[5]<v[3]:
+                if w3 >= min(w1,w5)*0.75 and w2 < w1 and w4 < w3:
+                    found.append(("Elliott 5-Wave Impulse","Bearish"))
+                if w3 < w1*1.05 and w5 < w3*1.05:
+                    found.append(("Elliott Ending Diagonal","Bearish"))
+
+    if len(seq)>=4:
+        p=seq[-4:]
+        v=[x[1] for x in p]; k=[x[2] for x in p]
+        if k==["H","L","H","L"]:
+            a=v[0]-v[1]; b=v[2]-v[1]; c=v[2]-v[3]
+            if a>0 and b>0 and c>0 and b<a and c>=a*0.75:
+                found.append(("Elliott ABC Correction","Bearish"))
+        elif k==["L","H","L","H"]:
+            a=v[1]-v[0]; b=v[1]-v[2]; c=v[3]-v[2]
+            if a>0 and b>0 and c>0 and b<a and c>=a*0.75:
+                found.append(("Elliott ABC Correction","Bullish"))
+    return list(dict.fromkeys(found))
+
+def pattern_status(df, pattern, direction, H=None, L=None):
+    """Return a compact lifecycle state for a detected structure."""
+    if df is None or len(df)==0: return "Unknown"
+    if H is None or L is None: _,_,H,L=geometry(df)
+    c=float(df["Close"].iloc[-1])
+    try:
+        d=pattern_target(df,pattern,direction,H,L)
+        if d and d.get("entry") is not None:
+            e=float(d["entry"])
+            if direction=="Bullish":
+                return "Confirmed" if c>=e else "Forming"
+            if direction=="Bearish":
+                return "Confirmed" if c<=e else "Forming"
+    except Exception:
+        pass
+    if pattern.startswith("Elliott"):
+        return "Forming"
+    return "Active"
 
 def geometry(df):
     H,L=pivots(df)
@@ -171,6 +269,7 @@ def geometry(df):
         if c[-1] > res + .15*rng: found.append(("Resistance Breakout","Bullish"))
         if c[-1] < sup - .15*rng: found.append(("Support Breakdown","Bearish"))
 
+    found.extend(elliott_patterns(df,H,L))
     found=list(dict.fromkeys(found))
     scores=[pattern_confidence(df,p,d,H,L) for p,d in found]
     overall=round(max(scores),1) if scores else 0.0
@@ -217,6 +316,29 @@ def pattern_target(df, pattern, direction, H=None, L=None):
         if direction=="Bullish": stop=sup; t1=res; t2=res+(res-sup)*.618
         else: stop=res; t1=sup; t2=sup-(res-sup)*.618
         method="Channel boundary projection"
+    elif pattern.startswith("Elliott") and len(df)>=20:
+        seq=_pivot_sequence(df,H,L)
+        if "5-Wave Impulse" in pattern and len(seq)>=6:
+            v=[x[1] for x in seq[-6:]]
+            if direction=="Bullish":
+                entry=c; stop=v[4]; t1=c+abs(v[5]-v[4]); t2=c+abs(v[5]-v[4])*1.618
+            else:
+                entry=c; stop=v[4]; t1=c-abs(v[5]-v[4]); t2=c-abs(v[5]-v[4])*1.618
+            method="Elliott impulse projection"
+        elif "Ending Diagonal" in pattern and len(seq)>=6:
+            v=[x[1] for x in seq[-6:]]
+            entry=c; stop=v[4]
+            move=abs(v[5]-v[4])
+            if direction=="Bullish": t1=c+move; t2=c+move*1.618
+            else: t1=c-move; t2=c-move*1.618
+            method="Ending diagonal breakout projection"
+        elif "ABC Correction" in pattern and len(seq)>=4:
+            v=[x[1] for x in seq[-4:]]
+            move=abs(v[3]-v[2])
+            entry=c; stop=v[3]
+            if direction=="Bullish": t1=c+move; t2=c+move*1.618
+            else: t1=c-move; t2=c-move*1.618
+            method="Elliott C-wave projection"
 
     if t1 is None:
         rng=float(max(h[-min(20,len(h)):])-min(l[-min(20,len(l)):]))
