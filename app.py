@@ -229,6 +229,7 @@ with st.sidebar:
     candles=st.selectbox("Number of candles",CANDLE_OPTIONS[timeframe],index=CANDLE_OPTIONS[timeframe].index(
         {"Daily":100,"Weekly":52,"Monthly":36}[timeframe]))
     view=st.radio("Direction filter",["All","Bullish","Bearish","Neutral"])
+    min_rr_filter=st.checkbox("Only setups with minimum R/R 1:2",value=True)
     scan=st.button("🔎 SCAN PATTERNS",type="primary",use_container_width=True)
     st.caption(f"{candles} {timeframe.lower()} candles will be used for the scan.")
 
@@ -244,15 +245,33 @@ if scan:
             found,strength,H,L=geometry(df)
             selected=[(p,d) for p,d in found if view=="All" or d==view]
             if selected:
-                pattern_scores=[pattern_confidence(df,p,d,H,L) for p,d in selected]
-                dirs=sorted(set(d for _,d in selected))
-                rows.append({
-                    "Stock":sym,
-                    "Timeframe":timeframe,
-                    "Candles":len(df),
-                    "Patterns Detected":", ".join(p for p,_ in selected),
-                    "Direction":", ".join(dirs),
-                    "Pattern Confidence":max(pattern_scores)})
+                eligible=[]
+                pattern_scores=[]
+                rr_values=[]
+                for p,d in selected:
+                    score=pattern_confidence(df,p,d,H,L)
+                    details=pattern_target(df,p,d,H,L)
+                    rr=None
+                    if details and details.get("stop") is not None and details.get("target1") is not None:
+                        risk=abs(float(details["entry"])-float(details["stop"]))
+                        reward=abs(float(details["target1"])-float(details["entry"]))
+                        rr=(reward/risk) if risk>0 else None
+                    pattern_scores.append(score)
+                    rr_values.append(rr)
+                    if (not min_rr_filter) or (rr is not None and rr >= 2.0):
+                        eligible.append((p,d,score,rr))
+
+                if eligible:
+                    dirs=sorted(set(d for _,d,_,_ in eligible))
+                    rows.append({
+                        "Stock":sym,
+                        "Timeframe":timeframe,
+                        "Candles":len(df),
+                        "Patterns Detected":", ".join(p for p,_,_,_ in eligible),
+                        "Direction":", ".join(dirs),
+                        "Pattern Confidence":max(x[2] for x in eligible),
+                        "Best R/R to T1":max(x[3] for x in eligible if x[3] is not None) if any(x[3] is not None for x in eligible) else None
+                    })
         except Exception:
             continue
         bar.progress(i/max(1,len(syms)))
@@ -264,7 +283,7 @@ if scan:
             kind="stable"
         ).reset_index(drop=True)
     st.session_state.results=result_df
-    st.session_state.scan_config=(universe,timeframe,candles,view)
+    st.session_state.scan_config=(universe,timeframe,candles,view,min_rr_filter)
     st.session_state.selected=None
 
 if "results" not in st.session_state:
@@ -277,11 +296,27 @@ if r.empty:
     st.stop()
 
 st.subheader("Detected patterns")
-st.caption("One row per stock. Multiple detected patterns are listed in the Patterns Detected column.")
+st.caption("One row per stock. With the 1:2 filter enabled, only stocks with at least one detected pattern offering R/R to Target 1 of 1:2 or better are shown.")
 
-show=r[["Stock","Timeframe","Candles","Patterns Detected","Direction","Pattern Confidence"]].copy()
-show["Pattern Confidence"]=show["Pattern Confidence"].map(lambda x:f"{x:.1f}")
-show=show.sort_values("Stock")
+show=r[["Stock","Timeframe","Candles","Patterns Detected","Direction","Pattern Confidence","Best R/R to T1"]].copy()
+
+# Keep confidence numeric while sorting so the displayed table is truly
+# ordered from strongest pattern-quality score to weakest.
+show["Pattern Confidence"]=pd.to_numeric(show["Pattern Confidence"], errors="coerce")
+show["Best R/R to T1"]=pd.to_numeric(show["Best R/R to T1"], errors="coerce")
+show=show.sort_values(
+    by=["Pattern Confidence", "Best R/R to T1", "Stock"],
+    ascending=[False, False, True],
+    kind="stable"
+).reset_index(drop=True)
+
+# Format only after sorting.
+show["Pattern Confidence"]=show["Pattern Confidence"].map(
+    lambda x:f"{x:.1f}" if pd.notna(x) else "—"
+)
+show["Best R/R to T1"]=show["Best R/R to T1"].map(
+    lambda x:f"1:{x:.2f}" if pd.notna(x) else "—"
+)
 
 st.dataframe(
     show,
@@ -294,6 +329,7 @@ st.dataframe(
         "Patterns Detected": st.column_config.TextColumn("Patterns Detected", width="large"),
         "Direction": st.column_config.TextColumn("Direction", width="medium"),
         "Pattern Confidence": st.column_config.TextColumn("Best Pattern Confidence", width="medium"),
+        "Best R/R to T1": st.column_config.TextColumn("Best R/R to T1", width="small"),
     },
 )
 
@@ -349,7 +385,7 @@ if st.session_state.get("selected"):
         f"Target method: **{details['method']}**" +
         (f" · R/R to T1: **1:{rr:.2f}**" if rr else "")
     )
-    st.caption("Confidence is specific to the selected pattern and measures pattern quality; it is not a probability of profit.")
+    st.caption("Confidence measures pattern quality; R/R is a reward-to-risk ratio, not a probability of hitting the target.")
 
     st.caption(
         f"Exact levels — Current: {money(details['current'])} · "
