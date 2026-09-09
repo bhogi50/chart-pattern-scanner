@@ -1,5 +1,6 @@
 
-import io, requests, pandas as pd, streamlit as st, plotly.graph_objects as go
+import io, json, html, requests, pandas as pd, streamlit as st
+import streamlit.components.v1 as components
 from detector import geometry, pattern_target
 
 st.set_page_config(page_title="Chart Pattern Scanner", page_icon="📈", layout="wide")
@@ -39,6 +40,185 @@ def get_prices(symbol,timeframe,candle_count):
     if x.empty or not needed.issubset(x.columns): return pd.DataFrame()
     return x.dropna(subset=list(needed)).tail(candle_count)
 
+
+def render_lightweight_chart(df, pattern, direction, details, H, L, confidence):
+    candles=[]
+    for idx,row in df.iterrows():
+        try:
+            t=int(pd.Timestamp(idx).timestamp())
+            candles.append({
+                "time":t,
+                "open":float(row["Open"]),
+                "high":float(row["High"]),
+                "low":float(row["Low"]),
+                "close":float(row["Close"])
+            })
+        except Exception:
+            pass
+
+    # Swing points are used to draw the actual detected pattern geometry.
+    highs=[{"time":int(pd.Timestamp(df.index[i]).timestamp()),"value":float(df["High"].iloc[i])}
+           for i in H if i < len(df)]
+    lows=[{"time":int(pd.Timestamp(df.index[i]).timestamp()),"value":float(df["Low"].iloc[i])}
+          for i in L if i < len(df)]
+
+    # Select relevant swing points for pattern rendering.
+    ph = highs[-5:]
+    pl = lows[-5:]
+    geometry_lines=[]
+
+    def line_from_points(points):
+        if len(points)<2:
+            return None
+        x1,x2=points[0]["time"],points[-1]["time"]
+        y1,y2=points[0]["value"],points[-1]["value"]
+        return {"start":{"time":x1,"value":y1},"end":{"time":x2,"value":y2}}
+
+    if pattern in ("Double Top","Double Bottom"):
+        pts = ph[-2:] if pattern=="Double Top" else pl[-2:]
+        ln=line_from_points(pts)
+        if ln: geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
+    elif pattern in ("Head and Shoulders","Inverse Head and Shoulders"):
+        pts=ph[-3:] if pattern=="Head and Shoulders" else pl[-3:]
+        ln=line_from_points(pts)
+        if ln: geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
+    elif pattern in ("Ascending Triangle","Descending Triangle","Symmetrical Triangle",
+                     "Rising Wedge","Falling Wedge","Rising Channel","Falling Channel"):
+        if len(ph)>=2: geometry_lines.append({"type":"trend","points":ph[-5:],"label":"Upper trendline"})
+        if len(pl)>=2: geometry_lines.append({"type":"trend","points":pl[-5:],"label":"Lower trendline"})
+    elif pattern=="Rectangle":
+        if ph and pl:
+            geometry_lines.append({"type":"horizontal","points":ph[-4:],"label":"Resistance"})
+            geometry_lines.append({"type":"horizontal","points":pl[-4:],"label":"Support"})
+    elif pattern in ("Bullish Flag","Bearish Flag","Bullish Pennant","Bearish Pennant","Cup and Handle"):
+        if len(ph)>=2: geometry_lines.append({"type":"trend","points":ph[-3:],"label":"Pattern upper boundary"})
+        if len(pl)>=2: geometry_lines.append({"type":"trend","points":pl[-3:],"label":"Pattern lower boundary"})
+
+    payload={
+        "candles":candles,
+        "highs":highs,
+        "lows":lows,
+        "geometry":geometry_lines,
+        "levels":{
+            "current":details["current"],
+            "entry":details["entry"],
+            "stop":details["stop"],
+            "target1":details["target1"],
+            "target2":details["target2"]
+        },
+        "pattern":pattern,
+        "direction":direction,
+        "confidence":confidence
+    }
+    data=json.dumps(payload, separators=(",",":"))
+
+    chart_html="""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+html,body{margin:0;padding:0;background:#0f131a;color:#d7dce5;font-family:Arial,sans-serif;overflow:hidden}
+#wrap{height:720px;width:100%;position:relative}
+#chart{height:680px;width:100%}
+#legend{height:40px;display:flex;align-items:center;gap:16px;padding:0 12px;font-size:13px;box-sizing:border-box;border-top:1px solid #242a34}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+</style>
+</head>
+<body>
+<div id="wrap">
+<div id="chart"></div>
+<div id="legend">
+<span><b>__PATTERN__</b></span>
+<span>Confidence: <b>__CONFIDENCE__</b></span>
+<span>__DIRECTION__</span>
+</div>
+</div>
+<script>
+const D=__DATA__;
+const el=document.getElementById('chart');
+const chart=LightweightCharts.createChart(el,{
+    autoSize:true,
+    layout:{background:{type:'solid',color:'#0f131a'},textColor:'#c9d1d9'},
+    grid:{vertLines:{color:'#1d232d'},horzLines:{color:'#1d232d'}},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+    rightPriceScale:{borderColor:'#303744'},
+    timeScale:{borderColor:'#303744',timeVisible:true,secondsVisible:false},
+    localization:{priceFormatter:p=>p.toFixed(2)}
+});
+const series=chart.addSeries(LightweightCharts.CandlestickSeries,{
+    upColor:'#26a69a',downColor:'#ef5350',
+    borderUpColor:'#26a69a',borderDownColor:'#ef5350',
+    wickUpColor:'#26a69a',wickDownColor:'#ef5350'
+});
+series.setData(D.candles);
+
+function addLine(name,color,width,style,price){
+    if(price===null || price===undefined || !Number.isFinite(price)) return;
+    series.createPriceLine({
+        price:price,color:color,lineWidth:width,lineStyle:style,
+        axisLabelVisible:true,title:name
+    });
+}
+addLine('Entry', '#4da3ff', 2, LightweightCharts.LineStyle.Dashed, D.levels.entry);
+addLine('Stop', '#ef5350', 2, LightweightCharts.LineStyle.Dashed, D.levels.stop);
+addLine('Target 1', '#26a69a', 2, LightweightCharts.LineStyle.Dashed, D.levels.target1);
+addLine('Target 2', '#9ccc65', 2, LightweightCharts.LineStyle.Dotted, D.levels.target2);
+
+function regression(points){
+    if(points.length<2) return null;
+    let n=points.length,sx=0,sy=0,sxx=0,sxy=0;
+    for(const p of points){sx+=p.time;sy+=p.value;sxx+=p.time*p.time;sxy+=p.time*p.value}
+    const den=n*sxx-sx*sx;
+    if(!den) return null;
+    const m=(n*sxy-sx*sy)/den,b=(sy-m*sx)/n;
+    return [
+      {time:points[0].time,value:m*points[0].time+b},
+      {time:points[points.length-1].time,value:m*points[points.length-1].time+b}
+    ];
+}
+
+const lineColors=['#f5c542','#8ab4f8','#bb86fc','#ff8a65'];
+let colorIndex=0;
+for(const g of D.geometry){
+    if(g.type==='horizontal'){
+        const vals=g.points.map(p=>p.value);
+        const avg=vals.reduce((a,b)=>a+b,0)/vals.length;
+        const ls=series;
+        ls.createPriceLine({price:avg,color:lineColors[colorIndex++%lineColors.length],
+            lineWidth:2,lineStyle:LightweightCharts.LineStyle.Solid,axisLabelVisible:true,title:g.label});
+    } else {
+        const pts=regression(g.points);
+        if(!pts) continue;
+        const ls=chart.addSeries(LightweightCharts.LineSeries,{
+            color:lineColors[colorIndex++%lineColors.length],lineWidth:2,
+            lineStyle:LightweightCharts.LineStyle.Solid,
+            lastValueVisible:false,priceLineVisible:false
+        });
+        ls.setData(pts);
+    }
+}
+
+const markers=[];
+for(const p of D.highs.slice(-5)){
+    markers.push({time:p.time,position:'aboveBar',color:'#f5c542',shape:'circle',text:'H'});
+}
+for(const p of D.lows.slice(-5)){
+    markers.push({time:p.time,position:'belowBar',color:'#8ab4f8',shape:'circle',text:'L'});
+}
+markers.sort((a,b)=>a.time-b.time);
+if(markers.length) LightweightCharts.createSeriesMarkers(series,markers);
+chart.timeScale().fitContent();
+</script>
+</body>
+</html>
+"""
+    chart_html=chart_html.replace("__DATA__", data).replace("__PATTERN__", html.escape(pattern)).replace("__CONFIDENCE__", f"{confidence:.1f}%").replace("__DIRECTION__", html.escape(direction))
+    components.html(chart_html,height=725,scrolling=False)
+
+
 st.title("📈 Chart Pattern Scanner")
 st.caption("Pure pattern detection • one result row per stock • details/chart appear only after View")
 
@@ -61,9 +241,11 @@ if scan:
         try:
             df=get_prices(sym+".NS",timeframe,candles)
             if len(df)<max(30,min(candles,45)): continue
-            found,strength,_,_=geometry(df)
+            found,strength,H,L=geometry(df)
             selected=[(p,d) for p,d in found if view=="All" or d==view]
             if selected:
+                from detector import pattern_confidence
+                pattern_scores=[pattern_confidence(df,p,d,H,L) for p,d in selected]
                 dirs=sorted(set(d for _,d in selected))
                 rows.append({
                     "Stock":sym,
@@ -71,7 +253,7 @@ if scan:
                     "Candles":len(df),
                     "Patterns Detected":", ".join(p for p,_ in selected),
                     "Direction":", ".join(dirs),
-                    "Pattern Strength":strength})
+                    "Pattern Confidence":max(pattern_scores)})
         except Exception:
             continue
         bar.progress(i/max(1,len(syms)))
@@ -91,8 +273,8 @@ if r.empty:
 st.subheader("Detected patterns")
 st.caption("One row per stock. Multiple detected patterns are listed in the Patterns Detected column.")
 
-show=r[["Stock","Timeframe","Candles","Patterns Detected","Direction","Pattern Strength"]].copy()
-show["Pattern Strength"]=show["Pattern Strength"].map(lambda x:f"{x:.1f}")
+show=r[["Stock","Timeframe","Candles","Patterns Detected","Direction","Pattern Confidence"]].copy()
+show["Pattern Confidence"]=show["Pattern Confidence"].map(lambda x:f"{x:.1f}")
 show=show.sort_values("Stock")
 
 st.dataframe(
@@ -105,7 +287,7 @@ st.dataframe(
         "Candles": st.column_config.NumberColumn("Candles", width="small"),
         "Patterns Detected": st.column_config.TextColumn("Patterns Detected", width="large"),
         "Direction": st.column_config.TextColumn("Direction", width="medium"),
-        "Pattern Strength": st.column_config.TextColumn("Pattern Strength", width="medium"),
+        "Pattern Confidence": st.column_config.TextColumn("Best Pattern Confidence", width="medium"),
     },
 )
 
@@ -121,6 +303,7 @@ if st.session_state.get("selected"):
         st.error("Price data could not be loaded for this stock. Please scan again.")
         st.stop()
 
+    from detector import pattern_confidence
     found,strength,H,L=geometry(df)
     available=[(p,d) for p,d in found if p in row["Patterns Detected"].split(", ")]
     if not available:
@@ -155,7 +338,12 @@ if st.session_state.get("selected"):
     risk=abs(details["entry"]-details["stop"]) if details["stop"] is not None else 0
     reward=abs(details["target1"]-details["entry"])
     rr=reward/risk if risk else None
-    st.info(f"Target method: **{details['method']}**"+(f" · R/R to T1: **1:{rr:.2f}**" if rr else ""))
+    st.info(
+        f"Pattern confidence: **__CONFIDENCE__** · "
+        f"Target method: **{details['method']}**" +
+        (f" · R/R to T1: **1:{rr:.2f}**" if rr else "")
+    )
+    st.caption("Confidence is a rule-based pattern-quality score, not a probability of profit.")
 
     st.caption(
         f"Exact levels — Current: {money(details['current'])} · "
@@ -163,17 +351,7 @@ if st.session_state.get("selected"):
         f"T1: {money(details['target1'])} · T2: {money(details['target2'])}"
     )
 
-    fig=go.Figure(go.Candlestick(x=df.index,open=df.Open,high=df.High,low=df.Low,close=df.Close,name="Candles"))
-    if H: fig.add_trace(go.Scatter(x=df.index[H],y=df.High.iloc[H],mode="markers",name="Swing High"))
-    if L: fig.add_trace(go.Scatter(x=df.index[L],y=df.Low.iloc[L],mode="markers",name="Swing Low"))
-    for y,label,dash in [(details["entry"],"Entry / breakout","dot"),
-                         (details["target1"],"Target 1","dash"),
-                         (details["target2"],"Target 2","dash"),
-                         (details["stop"],"Stop / invalidation","dash")]:
-        if y is not None: fig.add_hline(y=y,line_dash=dash,annotation_text=label)
-    fig.update_layout(height=680,xaxis_rangeslider_visible=False,hovermode="x unified",
-                      title=f"{sel} — {pat} ({direction})")
-    st.plotly_chart(fig,use_container_width=True)
+    render_lightweight_chart(df, pat, direction, details, H, L, confidence)
     if st.button("← Close details"):
         st.session_state.selected=None
         st.rerun()
