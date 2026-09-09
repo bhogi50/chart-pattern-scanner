@@ -1,25 +1,8 @@
-# Chart Pattern Scanner — PatternPy Edition
+# PatternPy-only Chart Pattern Scanner
 
-This version uses **PatternPy as the pattern-candidate engine** and a separate validation/scoring layer for this scanner.
+OHLCV data is passed directly to PatternPy's native `detect_head_shoulder`, `detect_double_top_bottom`, and `detect_channel` functions. The application only reads PatternPy's output, filters the displayed rows, and renders the chart.
 
-Pattern families shown by the application:
-- Double Top
-- Double Bottom
-- Head and Shoulders
-- Inverse Head and Shoulders
-- Bullish Flag
-- Bearish Flag
-- Rising Channel
-- Falling Channel
+There is no custom pattern detector, confidence score, target/stop/R:R calculation, flag detector, or custom validation layer.
 
-PatternPy is used for candidate recognition of tops/bottoms, H&S and channels. Flags remain scanner-specific because PatternPy does not provide a flag detector.
-
-The scanner then validates the candidate using price structure, ATR tolerance, spacing, neckline/reaction, channel fit/containment and recent-break checks before displaying it.
-
-## Run
-`pip install -r requirements.txt`
-`streamlit run app.py`
-
-## Attribution / license
 PatternPy: https://github.com/keithorange/PatternPy
-PatternPy is licensed CC BY-NC-SA 4.0. This project is intended for personal, non-commercial use.
+License: CC BY-NC-SA 4.0 (personal/non-commercial use).
