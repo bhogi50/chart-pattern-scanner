@@ -98,31 +98,22 @@ def render_lightweight_chart(df, pattern, direction, details, H, L, confidence):
 
     if pattern in ("Double Top","Double Bottom"):
         pts = ph[-2:] if pattern=="Double Top" else pl[-2:]
-        ln=line_from_points(pts)
-        if ln: geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
+        if len(pts)>=2:
+            geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
     elif pattern in ("Head and Shoulders","Inverse Head and Shoulders"):
         pts=ph[-3:] if pattern=="Head and Shoulders" else pl[-3:]
-        ln=line_from_points(pts)
-        if ln: geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
-    elif pattern in ("Ascending Triangle","Descending Triangle","Symmetrical Triangle",
-                     "Rising Wedge","Falling Wedge","Rising Channel","Falling Channel"):
-        if len(ph)>=2: geometry_lines.append({"type":"trend","points":ph[-5:],"label":"Upper trendline"})
-        if len(pl)>=2: geometry_lines.append({"type":"trend","points":pl[-5:],"label":"Lower trendline"})
-    elif pattern=="Rectangle":
-        if ph and pl:
-            geometry_lines.append({"type":"horizontal","points":ph[-4:],"label":"Resistance"})
-            geometry_lines.append({"type":"horizontal","points":pl[-4:],"label":"Support"})
-    elif pattern.startswith("Elliott"):
-        seq=[]
-        for i in sorted(set(H[-6:]+L[-6:])):
-            if i < len(df):
-                kind="H" if i in H else "L"
-                seq.append({"time":int(pd.Timestamp(df.index[i]).timestamp()),"value":float(df["High" if kind=="H" else "Low"].iloc[i])})
-        if len(seq)>=2:
-            geometry_lines.append({"type":"zigzag","points":seq[-6:],"label":pattern})
-    elif pattern in ("Bullish Flag","Bearish Flag","Bullish Pennant","Bearish Pennant","Cup and Handle"):
-        if len(ph)>=2: geometry_lines.append({"type":"trend","points":ph[-3:],"label":"Pattern upper boundary"})
-        if len(pl)>=2: geometry_lines.append({"type":"trend","points":pl[-3:],"label":"Pattern lower boundary"})
+        if len(pts)>=3:
+            geometry_lines.append({"type":"pattern","points":pts,"label":pattern})
+    elif pattern in ("Rising Channel","Falling Channel"):
+        if len(ph)>=2:
+            geometry_lines.append({"type":"trend","points":ph[-5:],"label":"Resistance"})
+        if len(pl)>=2:
+            geometry_lines.append({"type":"trend","points":pl[-5:],"label":"Support"})
+    elif pattern in ("Bullish Flag","Bearish Flag"):
+        if len(ph)>=2:
+            geometry_lines.append({"type":"trend","points":ph[-3:],"label":"Resistance"})
+        if len(pl)>=2:
+            geometry_lines.append({"type":"trend","points":pl[-3:],"label":"Support"})
 
     payload={
         "candles":candles,

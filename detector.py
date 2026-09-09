@@ -1,344 +1,195 @@
-
 import numpy as np
+
+ALLOWED_PATTERNS = (
+    "Double Top",
+    "Double Bottom",
+    "Head and Shoulders",
+    "Inverse Head and Shoulders",
+    "Bullish Flag",
+    "Bearish Flag",
+    "Rising Channel",
+    "Falling Channel",
+)
 
 def pivots(df, left=3, right=3):
     if df is None or len(df) < left + right + 3:
         return [], []
-    h = df["High"].to_numpy(float); l = df["Low"].to_numpy(float)
-    H, L = [], []
+    h=df["High"].to_numpy(float)
+    l=df["Low"].to_numpy(float)
+    H,L=[],[]
     for i in range(left, len(df)-right):
         if h[i] >= np.max(h[i-left:i]) and h[i] >= np.max(h[i+1:i+right+1]):
             H.append(i)
         if l[i] <= np.min(l[i-left:i]) and l[i] <= np.min(l[i+1:i+right+1]):
             L.append(i)
-    return H, L
+    return H,L
 
-def _near(a,b,t=.04):
+def _near(a,b,t=0.04):
     return abs(a-b)/max(abs(a),abs(b),1e-9) <= t
 
 def _slope(y,x):
-    return float(np.polyfit(np.asarray(x,float), np.asarray(y,float), 1)[0]) if len(x) >= 2 else 0.0
+    return float(np.polyfit(np.asarray(x,float),np.asarray(y,float),1)[0]) if len(x)>=2 else 0.0
 
-def _clamp(x, lo=0, hi=100):
-    return float(max(lo, min(hi, x)))
+def _clamp(x,lo=0,hi=100):
+    return float(max(lo,min(hi,x)))
 
-def _line_fit_score(values, indices):
-    if len(indices) < 2:
+def _line_fit_score(values,indices):
+    if len(indices)<2:
         return 0.0
-    y=np.asarray(values,dtype=float)
-    x=np.asarray(indices,dtype=float)
+    y=np.asarray(values,float); x=np.asarray(indices,float)
     coef=np.polyfit(x,y,1)
     pred=coef[0]*x+coef[1]
     err=np.mean(np.abs(y-pred))/max(np.mean(np.abs(y)),1e-9)
     return _clamp(100*(1-err*12))
 
-def pattern_confidence(df, pattern, direction, H=None, L=None):
-    if df is None or len(df)==0:
+def pattern_confidence(df,pattern,direction,H=None,L=None):
+    if pattern not in ALLOWED_PATTERNS or df is None or len(df)==0:
         return 0.0
     if H is None or L is None:
-        _,_,H,L=geometry(df)
-    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float); c=df["Close"].to_numpy(float)
+        H,L=pivots(df)
+    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
+    quality=50.0
 
-    touch = _clamp(35 + min(len(H)+len(L),12)*4)
-    recency = _clamp(100 - max(0,len(df)-max((H[-1] if H else 0),(L[-1] if L else 0)))*1.2)
-    base = 45.0
-    quality = 0.0
+    if pattern in ("Double Top","Double Bottom"):
+        idx=H[-2:] if pattern=="Double Top" else L[-2:]
+        if len(idx)>=2:
+            vals=(h[idx] if pattern=="Double Top" else l[idx])
+            similarity=_clamp(100-(abs(vals[0]-vals[1])/max(abs(np.mean(vals)),1e-9))*1000)
+            spacing=_clamp(min(100,abs(idx[1]-idx[0])/20*100))
+            quality=.70*similarity+.30*spacing
+
+    elif pattern in ("Head and Shoulders","Inverse Head and Shoulders"):
+        idx=H[-3:] if pattern=="Head and Shoulders" else L[-3:]
+        if len(idx)>=3:
+            vals=(h[idx] if pattern=="Head and Shoulders" else l[idx])
+            shoulders=_clamp(100-abs(vals[0]-vals[2])/max(abs(np.mean([vals[0],vals[2]])),1e-9)*1000)
+            head_gap=((vals[1]-max(vals[0],vals[2]))/max(abs(vals[1]),1e-9)*100
+                      if pattern=="Head and Shoulders"
+                      else (min(vals[0],vals[2])-vals[1])/max(abs(vals[1]),1e-9)*100)
+            quality=.55*shoulders+.45*_clamp(head_gap*3)
+
+    elif pattern in ("Rising Channel","Falling Channel") and len(H)>=2 and len(L)>=2:
+        hi=H[-5:]; lo=L[-5:]
+        hs=_slope(h[hi],hi); ls=_slope(l[lo],lo)
+        fit=(_line_fit_score(h[hi],hi)+_line_fit_score(l[lo],lo))/2
+        parallel=_clamp(100-abs(hs-ls)/max(abs(hs),abs(ls),1e-9)*100)
+        quality=.65*fit+.35*parallel
+
+    elif pattern in ("Bullish Flag","Bearish Flag") and len(df)>=25:
+        c=df["Close"].to_numpy(float)
+        p=c[-25:-10]; q=c[-10:]
+        impulse=abs(p[-1]/p[0]-1) if p[0] else 0
+        consolidation=(q.max()-q.min())/max(abs(q.mean()),1e-9)
+        quality=.55*_clamp(impulse*450)+.45*_clamp(100-consolidation*700)
+
+    touch=_clamp(35+min(len(H)+len(L),12)*4)
+    last_pivot=max((H[-1] if H else 0),(L[-1] if L else 0))
+    recency=_clamp(100-max(0,len(df)-last_pivot)*1.2)
+    return round(_clamp(.50*50+.40*quality+.07*touch+.03*recency),1)
+
+def geometry(df):
+    H,L=pivots(df)
+    if df is None or len(df)==0:
+        return [],0.0,H,L
+    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
+    c=df["Close"].to_numpy(float)
+    found=[]
 
     if len(H)>=2 and len(L)>=2:
         hi=H[-5:]; lo=L[-5:]
         hs=_slope(h[hi],hi); ls=_slope(l[lo],lo)
-        hf=_line_fit_score(h[hi],hi); lf=_line_fit_score(l[lo],lo)
-        fit=(hf+lf)/2
+        if hs>0 and ls>0 and _near(hs,ls,.55):
+            found.append(("Rising Channel","Bullish"))
+        if hs<0 and ls<0 and _near(hs,ls,.55):
+            found.append(("Falling Channel","Bearish"))
 
-        if pattern in ("Symmetrical Triangle","Ascending Triangle","Descending Triangle",
-                       "Rising Wedge","Falling Wedge","Rising Channel","Falling Channel"):
-            quality = fit
-            if pattern=="Symmetrical Triangle":
-                convergence = _clamp(100 - abs((h[hi[-1]]-l[lo[-1]])/(max(h[hi[-1]],1e-9))
-                                               -(h[hi[0]]-l[lo[0]])/(max(h[hi[0]],1e-9)))*500)
-                quality=.65*fit+.35*convergence
-            elif pattern=="Ascending Triangle":
-                quality=.5*hf+.5*_clamp(100-abs(hs)*100000)
-            elif pattern=="Descending Triangle":
-                quality=.5*lf+.5*_clamp(100-abs(ls)*100000)
-            elif pattern in ("Rising Wedge","Falling Wedge"):
-                convergence=_clamp(100-abs(abs(hs)-abs(ls))/max(abs(hs),abs(ls),1e-9)*100)
-                quality=.65*fit+.35*convergence
-            else:
-                parallel=_clamp(100-abs(hs-ls)/max(abs(hs),abs(ls),1e-9)*100)
-                quality=.65*fit+.35*parallel
-
-        elif pattern in ("Double Top","Double Bottom"):
-            pts=h[H[-2:]] if pattern=="Double Top" else l[L[-2:]]
-            similarity=_clamp(100-(abs(pts[0]-pts[1])/max(abs(np.mean(pts)),1e-9))*1000)
-            spacing=_clamp(min(100,(abs((H[-1]-H[-2]) if pattern=="Double Top" else (L[-1]-L[-2])))/20*100))
-            quality=.65*similarity+.35*spacing
-
-        elif pattern in ("Head and Shoulders","Inverse Head and Shoulders"):
-            pts=h[H[-3:]] if pattern=="Head and Shoulders" else l[L[-3:]]
-            shoulders=_clamp(100-abs(pts[0]-pts[2])/max(abs(np.mean([pts[0],pts[2]])),1e-9)*1000)
-            head_gap = ((pts[1]-max(pts[0],pts[2]))/max(abs(pts[1]),1e-9)*100
-                        if pattern=="Head and Shoulders"
-                        else (min(pts[0],pts[2])-pts[1])/max(abs(pts[1]),1e-9)*100)
-            head_quality=_clamp(head_gap*3)
-            quality=.55*shoulders+.45*head_quality
-
-        elif pattern=="Rectangle":
-            top=np.median(h[H[-5:]]); bot=np.median(l[L[-5:]])
-            top_dev=np.std(h[H[-5:]])/max(abs(top),1e-9)
-            bot_dev=np.std(l[L[-5:]])/max(abs(bot),1e-9)
-            quality=_clamp(100-(top_dev+bot_dev)*1000)
-
-    if pattern in ("Bullish Flag","Bearish Flag","Bullish Pennant","Bearish Pennant","Cup and Handle"):
-        if len(df)>=25:
-            p=c[-25:-10]; q=c[-10:]
-            impulse=abs(p[-1]/p[0]-1) if p[0] else 0
-            consolidation=(q.max()-q.min())/max(abs(q.mean()),1e-9)
-            impulse_score=_clamp(impulse*450)
-            consolidation_score=_clamp(100-consolidation*700)
-            quality=.55*impulse_score+.45*consolidation_score
-            if pattern=="Cup and Handle" and len(df)>=45:
-                w=c[-45:]; left=np.max(w[:18]); bottom=np.min(w[12:34]); right=np.max(w[30:40])
-                cup_depth=(left-bottom)/max(abs(left),1e-9)
-                rim_similarity=_clamp(100-abs(left-right)/max(abs(left),1e-9)*1000)
-                quality=.45*_clamp(cup_depth*450)+.55*rim_similarity
-
-    if pattern.startswith("Elliott"):
-        seq=_pivot_sequence(df,H,L)
-        if "5-Wave Impulse" in pattern and len(seq)>=6:
-            v=[x[1] for x in seq[-6:]]; k=[x[2] for x in seq[-6:]]
-            if k in (["L","H","L","H","L","H"],["H","L","H","L","H","L"]):
-                legs=[abs(v[1]-v[0]),abs(v[3]-v[2]),abs(v[5]-v[4])]
-                retr=[abs(v[2]-v[1]),abs(v[4]-v[3])]
-                quality=.55*_clamp(min(legs)/max(max(legs),1e-9)*120)+.45*_clamp(100-max(retr[i]/max(legs[i],1e-9) for i in range(2))*70)
-        elif "Ending Diagonal" in pattern and len(seq)>=6:
-            v=[x[1] for x in seq[-6:]]
-            spans=[abs(v[1]-v[0]),abs(v[3]-v[2]),abs(v[5]-v[4])]
-            contraction=_clamp(100-abs(spans[1]/max(spans[0],1e-9)-0.75)*180-abs(spans[2]/max(spans[1],1e-9)-0.75)*180)
-            quality=contraction
-        elif "ABC Correction" in pattern and len(seq)>=4:
-            v=[x[1] for x in seq[-4:]]
-            a=abs(v[1]-v[0]); b=abs(v[2]-v[1]); cleg=abs(v[3]-v[2])
-            quality=.5*_clamp(100-b/max(a,1e-9)*100)+.5*_clamp(min(cleg/max(a,1e-9),1.5)/1.5*100)
-
-    if pattern in ("Resistance Breakout","Support Breakdown"):
-        recent_range=max(h[-20:])-min(l[-20:])
-        distance=abs(c[-1]-(max(h[H[-4:]]) if H else c[-1]) if direction=="Bullish"
-                     else c[-1]-(min(l[L[-4:]]) if L else c[-1]))
-        quality=_clamp(55+(distance/max(recent_range,1e-9))*450)
-
-    # A recent, well-defined structure gets more weight than a stale structure.
-    score=0.50*base + 0.40*quality + 0.07*touch + 0.03*recency
-    return round(_clamp(score),1)
-
-
-def _alternating_pivots(H, L):
-    """Return recent confirmed pivots as (index, price, kind), alternating H/L."""
-    pts=[(i,"H") for i in H]+[(i,"L") for i in L]
-    pts.sort(key=lambda x:x[0])
-    if not pts: return []
-    out=[]
-    for i,k in pts:
-        if out and out[-1][2]==k:
-            # Keep the more extreme pivot when two same-type pivots are adjacent.
-            old=out[-1]
-            if (k=="H" and i>old[0]) or (k=="L" and i>old[0]):
-                out[-1]=(i,None,k)
-        else:
-            out.append((i,None,k))
-    return out
-
-def _pivot_sequence(df,H,L):
-    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
-    pts=_alternating_pivots(H,L)
-    return [(i, float(h[i] if k=="H" else l[i]), k) for i,_,k in pts]
-
-def elliott_patterns(df,H,L):
-    """Heuristic Elliott structures from confirmed swing pivots.
-    This is a structural detector, not a full Elliott Wave count engine.
-    """
-    seq=_pivot_sequence(df,H,L)
-    found=[]
-    if len(seq)>=6:
-        p=seq[-6:]
-        idx=[x[0] for x in p]; v=[x[1] for x in p]; k=[x[2] for x in p]
-        if k==["L","H","L","H","L","H"]:
-            w1=v[1]-v[0]; w2=v[1]-v[2]; w3=v[3]-v[2]; w4=v[3]-v[4]; w5=v[5]-v[4]
-            if w1>0 and w2>0 and w3>0 and w4>0 and w5>0 and v[2]>v[0] and v[4]>v[2] and v[5]>v[3]:
-                # Basic impulse quality: wave 3 is not the shortest and retracements stay orderly.
-                if w3 >= min(w1,w5)*0.75 and w2 < w1 and w4 < w3:
-                    found.append(("Elliott 5-Wave Impulse","Bullish"))
-                # Ending diagonal: contracting legs with overlapping/converging structure.
-                if w3 < w1*1.05 and w5 < w3*1.05 and (w3/w1 < 1.05) and (w5/w3 < 1.05):
-                    found.append(("Elliott Ending Diagonal","Bullish"))
-        elif k==["H","L","H","L","H","L"]:
-            w1=v[0]-v[1]; w2=v[2]-v[1]; w3=v[2]-v[3]; w4=v[4]-v[3]; w5=v[4]-v[5]
-            if w1>0 and w2>0 and w3>0 and w4>0 and w5>0 and v[2]<v[0] and v[4]<v[2] and v[5]<v[3]:
-                if w3 >= min(w1,w5)*0.75 and w2 < w1 and w4 < w3:
-                    found.append(("Elliott 5-Wave Impulse","Bearish"))
-                if w3 < w1*1.05 and w5 < w3*1.05:
-                    found.append(("Elliott Ending Diagonal","Bearish"))
-
-    if len(seq)>=4:
-        p=seq[-4:]
-        v=[x[1] for x in p]; k=[x[2] for x in p]
-        if k==["H","L","H","L"]:
-            a=v[0]-v[1]; b=v[2]-v[1]; c=v[2]-v[3]
-            if a>0 and b>0 and c>0 and b<a and c>=a*0.75:
-                found.append(("Elliott ABC Correction","Bearish"))
-        elif k==["L","H","L","H"]:
-            a=v[1]-v[0]; b=v[1]-v[2]; c=v[3]-v[2]
-            if a>0 and b>0 and c>0 and b<a and c>=a*0.75:
-                found.append(("Elliott ABC Correction","Bullish"))
-    return list(dict.fromkeys(found))
-
-def pattern_status(df, pattern, direction, H=None, L=None):
-    """Return a compact lifecycle state for a detected structure."""
-    if df is None or len(df)==0: return "Unknown"
-    if H is None or L is None: _,_,H,L=geometry(df)
-    c=float(df["Close"].iloc[-1])
-    try:
-        d=pattern_target(df,pattern,direction,H,L)
-        if d and d.get("entry") is not None:
-            e=float(d["entry"])
-            if direction=="Bullish":
-                return "Confirmed" if c>=e else "Forming"
-            if direction=="Bearish":
-                return "Confirmed" if c<=e else "Forming"
-    except Exception:
-        pass
-    if pattern.startswith("Elliott"):
-        return "Forming"
-    return "Active"
-
-def geometry(df):
-    H,L=pivots(df)
-    if len(df)==0:
-        return [], 0.0, H, L
-    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float); c=df["Close"].to_numpy(float)
-    found=[]
-    if len(H)>=2 and len(L)>=2:
-        hi=H[-5:]; lo=L[-5:]
-        sh=_slope(h[hi],hi); sl=_slope(l[lo],lo)
-        if sh<0 and sl>0: found.append(("Symmetrical Triangle","Neutral"))
-        if abs(sh)<abs(sl)*.35 and sl>0: found.append(("Ascending Triangle","Bullish"))
-        if abs(sl)<abs(sh)*.35 and sh<0: found.append(("Descending Triangle","Bearish"))
-        if sh>0 and sl>0 and sh>sl*1.25: found.append(("Rising Wedge","Bearish"))
-        if sh<0 and sl<0 and abs(sl)>abs(sh)*1.25: found.append(("Falling Wedge","Bullish"))
-        if sh>0 and sl>0 and _near(sh,sl,.55): found.append(("Rising Channel","Bullish"))
-        if sh<0 and sl<0 and _near(sh,sl,.55): found.append(("Falling Channel","Bearish"))
-        if H[-1]-H[-2]>=8 and _near(h[H[-1]],h[H[-2]],.03): found.append(("Double Top","Bearish"))
-        if L[-1]-L[-2]>=8 and _near(l[L[-1]],l[L[-2]],.03): found.append(("Double Bottom","Bullish"))
+    if len(H)>=2 and H[-1]-H[-2]>=8 and _near(h[H[-1]],h[H[-2]],.03):
+        found.append(("Double Top","Bearish"))
+    if len(L)>=2 and L[-1]-L[-2]>=8 and _near(l[L[-1]],l[L[-2]],.03):
+        found.append(("Double Bottom","Bullish"))
 
     if len(H)>=3:
         a,b,d=H[-3:]
-        if h[b]>h[a] and h[b]>h[d] and _near(h[a],h[d],.08): found.append(("Head and Shoulders","Bearish"))
+        if h[b]>h[a] and h[b]>h[d] and _near(h[a],h[d],.08):
+            found.append(("Head and Shoulders","Bearish"))
     if len(L)>=3:
         a,b,d=L[-3:]
-        if l[b]<l[a] and l[b]<l[d] and _near(l[a],l[d],.08): found.append(("Inverse Head and Shoulders","Bullish"))
-
-    if len(H)>=2 and len(L)>=2:
-        hh=h[H[-5:]]; ll=l[L[-5:]]
-        top=float(np.median(hh)); bot=float(np.median(ll))
-        if np.max(abs(hh-top))/max(abs(top),1e-9)<.035 and np.max(abs(ll-bot))/max(abs(bot),1e-9)<.035:
-            found.append(("Rectangle","Neutral"))
+        if l[b]<l[a] and l[b]<l[d] and _near(l[a],l[d],.08):
+            found.append(("Inverse Head and Shoulders","Bullish"))
 
     if len(df)>=25:
         p=c[-25:-10]; q=c[-10:]
         imp=p[-1]/p[0]-1 if p[0] else 0
         if abs(imp)>.12 and (q.max()-q.min())/max(abs(q.mean()),1e-9)<.08:
-            found.append(("Bullish Flag" if imp>0 else "Bearish Flag","Bullish" if imp>0 else "Bearish"))
+            found.append(("Bullish Flag" if imp>0 else "Bearish Flag",
+                          "Bullish" if imp>0 else "Bearish"))
 
-    if len(df)>=45:
-        w=c[-45:]; left=int(np.argmax(w[:18])); bottom=int(np.argmin(w[12:34]))+12
-        if bottom+4<40:
-            right=int(np.argmax(w[bottom+4:40]))+bottom+4
-            if left<bottom<right and _near(w[left],w[right],.10):
-                if (min(w[left],w[right])-w[bottom])/max(abs(w[bottom]),1e-9)>.08:
-                    found.append(("Cup and Handle","Bullish"))
-
-    if len(df)>=25:
-        p=c[-25:-10]; q=c[-10:]
-        imp=p[-1]/p[0]-1 if p[0] else 0
-        if abs(imp)>.10 and (q.max()-q.min()) < .75*(df.High.iloc[-10]-df.Low.iloc[-10]):
-            found.append(("Bullish Pennant" if imp>0 else "Bearish Pennant","Bullish" if imp>0 else "Bearish"))
-
-    if len(H)>=2 and len(L)>=2:
-        res=float(max(h[H[-4:]])); sup=float(min(l[L[-4:]]))
-        rng=float(np.mean(h[-min(20,len(h)):] - l[-min(20,len(l)):]))
-        if c[-1] > res + .15*rng: found.append(("Resistance Breakout","Bullish"))
-        if c[-1] < sup - .15*rng: found.append(("Support Breakdown","Bearish"))
-
-    found.extend(elliott_patterns(df,H,L))
-    found=list(dict.fromkeys(found))
+    found=list(dict.fromkeys(x for x in found if x[0] in ALLOWED_PATTERNS))
     scores=[pattern_confidence(df,p,d,H,L) for p,d in found]
-    overall=round(max(scores),1) if scores else 0.0
-    return found, overall, H, L
+    return found,round(max(scores),1) if scores else 0.0,H,L
 
-def pattern_target(df, pattern, direction, H=None, L=None):
-    if df is None or len(df)==0:
+def pattern_status(df,pattern,direction,H=None,L=None):
+    if pattern not in ALLOWED_PATTERNS or df is None or len(df)==0:
+        return "Forming"
+    if H is None or L is None:
+        H,L=pivots(df)
+    d=pattern_target(df,pattern,direction,H,L)
+    if not d or d.get("entry") is None:
+        return "Forming"
+    c=float(df["Close"].iloc[-1]); e=float(d["entry"])
+    if direction=="Bullish":
+        return "Formed/Active" if c>=e else "Forming"
+    if direction=="Bearish":
+        return "Formed/Active" if c<=e else "Forming"
+    return "Forming"
+
+def pattern_target(df,pattern,direction,H=None,L=None):
+    if pattern not in ALLOWED_PATTERNS or df is None or len(df)==0:
         return None
     if H is None or L is None:
-        _,_,H,L=geometry(df)
-    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float); c=float(df["Close"].iloc[-1])
+        H,L=pivots(df)
+    h=df["High"].to_numpy(float); l=df["Low"].to_numpy(float)
+    c=float(df["Close"].iloc[-1])
     entry=c; stop=None; t1=None; t2=None; method="Recent range"
 
-    if len(H)>=2 and len(L)>=2:
-        res=float(max(h[H[-4:]])); sup=float(min(l[L[-4:]])); height=max(res-sup,0)
-        if direction=="Bullish": entry=res; stop=sup; t1=res+height; t2=res+1.618*height
-        elif direction=="Bearish": entry=sup; stop=res; t1=sup-height; t2=sup-1.618*height
-        else: t1=c+height; t2=c-height
-        method="Pattern range measured move"
-
     if pattern=="Double Bottom" and len(L)>=2:
-        base=min(l[L[-2]],l[L[-1]]); neck=float(max(h[L[-2]:L[-1]+1])); height=neck-base
-        entry=neck; stop=base; t1=neck+height; t2=neck+1.618*height; method="Neckline + pattern height"
+        base=min(l[L[-2]],l[L[-1]])
+        neck=float(max(h[L[-2]:L[-1]+1]))
+        height=max(neck-base,0)
+        entry=neck; stop=base; t1=neck+height; t2=neck+1.618*height
+        method="Neckline + pattern height"
     elif pattern=="Double Top" and len(H)>=2:
-        top=max(h[H[-2]],h[H[-1]]); neck=float(min(l[H[-2]:H[-1]+1])); height=top-neck
-        entry=neck; stop=top; t1=neck-height; t2=neck-1.618*height; method="Neckline - pattern height"
-    elif pattern in ("Head and Shoulders","Inverse Head and Shoulders") and len(H)>=3 and len(L)>=3:
-        if pattern=="Head and Shoulders":
-            head=h[H[-2]]
-            neck=(min(l[H[-3]:H[-2]+1])+min(l[H[-2]:H[-1]+1]))/2
-            height=head-neck; entry=neck; stop=head; t1=neck-height; t2=neck-1.618*height
-        else:
-            head=l[L[-2]]
-            neck=(max(h[L[-3]:L[-2]+1])+max(h[L[-2]:L[-1]+1]))/2
-            height=neck-head; entry=neck; stop=head; t1=neck+height; t2=neck+1.618*height
+        top=max(h[H[-2]],h[H[-1]])
+        neck=float(min(l[H[-2]:H[-1]+1]))
+        height=max(top-neck,0)
+        entry=neck; stop=top; t1=neck-height; t2=neck-1.618*height
+        method="Neckline - pattern height"
+    elif pattern=="Head and Shoulders" and len(H)>=3 and len(L)>=2:
+        head=h[H[-2]]
+        neck=(min(l[L[-2]:H[-2]+1]) + min(l[H[-2]:H[-1]+1]))/2
+        height=max(head-neck,0)
+        entry=neck; stop=head; t1=neck-height; t2=neck-1.618*height
         method="Head-to-neckline measured move"
-    elif pattern in ("Bullish Flag","Bearish Flag","Rising Wedge","Falling Wedge","Cup and Handle") and len(df)>=25:
+    elif pattern=="Inverse Head and Shoulders" and len(L)>=3 and len(H)>=2:
+        head=l[L[-2]]
+        neck=(max(h[H[-2]:L[-2]+1]) + max(h[L[-2]:L[-1]+1]))/2
+        height=max(neck-head,0)
+        entry=neck; stop=head; t1=neck+height; t2=neck+1.618*height
+        method="Head-to-neckline measured move"
+    elif pattern in ("Bullish Flag","Bearish Flag") and len(df)>=25:
         pole=float(max(h[-25:-10])-min(l[-25:-10]))
-        if direction=="Bullish": stop=float(min(l[-10:])); t1=c+pole; t2=c+1.618*pole
-        elif direction=="Bearish": stop=float(max(h[-10:])); t1=c-pole; t2=c-1.618*pole
+        if direction=="Bullish":
+            entry=c; stop=float(min(l[-10:])); t1=c+pole; t2=c+1.618*pole
+        else:
+            entry=c; stop=float(max(h[-10:])); t1=c-pole; t2=c-1.618*pole
         method="Measured prior impulse"
     elif pattern in ("Rising Channel","Falling Channel") and len(H)>=2 and len(L)>=2:
         res=float(max(h[H[-5:]])); sup=float(min(l[L[-5:]]))
-        if direction=="Bullish": stop=sup; t1=res; t2=res+(res-sup)*.618
-        else: stop=res; t1=sup; t2=sup-(res-sup)*.618
+        if direction=="Bullish":
+            entry=c; stop=sup; t1=res; t2=res+(res-sup)*.618
+        else:
+            entry=c; stop=res; t1=sup; t2=sup-(res-sup)*.618
         method="Channel boundary projection"
-    elif pattern.startswith("Elliott") and len(df)>=20:
-        seq=_pivot_sequence(df,H,L)
-        if "5-Wave Impulse" in pattern and len(seq)>=6:
-            v=[x[1] for x in seq[-6:]]
-            if direction=="Bullish":
-                entry=c; stop=v[4]; t1=c+abs(v[5]-v[4]); t2=c+abs(v[5]-v[4])*1.618
-            else:
-                entry=c; stop=v[4]; t1=c-abs(v[5]-v[4]); t2=c-abs(v[5]-v[4])*1.618
-            method="Elliott impulse projection"
-        elif "Ending Diagonal" in pattern and len(seq)>=6:
-            v=[x[1] for x in seq[-6:]]
-            entry=c; stop=v[4]
-            move=abs(v[5]-v[4])
-            if direction=="Bullish": t1=c+move; t2=c+move*1.618
-            else: t1=c-move; t2=c-move*1.618
-            method="Ending diagonal breakout projection"
-        elif "ABC Correction" in pattern and len(seq)>=4:
-            v=[x[1] for x in seq[-4:]]
-            move=abs(v[3]-v[2])
-            entry=c; stop=v[3]
-            if direction=="Bullish": t1=c+move; t2=c+move*1.618
-            else: t1=c-move; t2=c-move*1.618
-            method="Elliott C-wave projection"
 
     if t1 is None:
         rng=float(max(h[-min(20,len(h)):])-min(l[-min(20,len(l)):]))
@@ -349,4 +200,5 @@ def pattern_target(df, pattern, direction, H=None, L=None):
         else:
             t1=c+rng; t2=c-rng
         method="Recent 20-candle range fallback"
+
     return {"current":c,"entry":entry,"stop":stop,"target1":t1,"target2":t2,"method":method}
