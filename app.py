@@ -350,10 +350,17 @@ st.subheader("Detected patterns")
 st.caption("One row per stock. With the 1:2 filter enabled, only stocks with at least one detected pattern offering R/R to Target 1 of 1:2 or better are shown.")
 
 show=r[["Stock","Timeframe","Candles","Pattern","Status","Bias","Confidence"]].copy()
+# Sort by the best detected pattern confidence without exposing the helper column.
+if "Pattern Confidence" in r.columns:
+    _confidence_order = pd.to_numeric(r["Pattern Confidence"], errors="coerce")
+    show["_confidence_order"] = _confidence_order.to_numpy()
+    show=show.sort_values(by=["_confidence_order","Stock"], ascending=[False,True], kind="stable")
+    show=show.drop(columns=["_confidence_order"]).reset_index(drop=True)
+else:
+    show=show.sort_values(by=["Stock"], ascending=[True], kind="stable").reset_index(drop=True)
 
 # Keep confidence numeric while sorting so the displayed table is truly
 # ordered from strongest pattern-quality score to weakest.
-show=show.sort_values(by=["Pattern Confidence","Stock"],ascending=[False,True],kind="stable").reset_index(drop=True)
 
 st.dataframe(
     show,
